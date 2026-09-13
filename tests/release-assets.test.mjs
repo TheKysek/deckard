@@ -107,10 +107,10 @@ test('archive is strictly below the GitHub 2 GiB asset limit', () => {
 
 test('release versions and production packaging remain aligned', async () => {
   for (const name of ['package.json', 'extension/manifest.json']) {
-    assert.equal(JSON.parse(await fs.readFile(path.join(root, name), 'utf8')).version, '0.6.0');
+    assert.equal(JSON.parse(await fs.readFile(path.join(root, name), 'utf8')).version, '0.6.1');
   }
   const script = await fs.readFile(path.join(root, 'scripts/package-release.mjs'), 'utf8');
-  assert.match(script, /const version = '0\.6\.0'/);
+  assert.match(script, /const version = '0\.6\.1'/);
   assert.match(script, /native-cli\/model-assets\.json/);
   assert.match(script, /share\/licenses\/model-assets\.json/);
   assert.match(script, /checkArchiveSize\(\(await fs.stat\(archive\)\).size\)/);

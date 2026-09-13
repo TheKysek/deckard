@@ -23,6 +23,18 @@ test("HTTP(S) only and broad host permissions", () => {
   }
 });
 
+test("site preferences normalize exact hostnames without accepting URLs or match patterns", () => {
+  assert.equal(C.hostnameOf("https://ChatGPT.com:8443/chat?id=1"), "chatgpt.com");
+  assert.equal(C.hostnameOf("http://chatgpt.com/"), "chatgpt.com");
+  assert.equal(C.hostnameOf("https://sub.chatgpt.com/"), "sub.chatgpt.com");
+  assert.equal(C.hostnameOf("chrome://settings"), null);
+  assert.deepEqual(C.normalizeExcludedSites(["ChatGPT.com", "chatgpt.com", "localhost", "[::1]",
+    "https://other.com", "other.com/path", "other.com:443", "user@other.com",
+    "*.other.com", "", null, 123]), ["chatgpt.com", "localhost", "[::1]"]);
+  assert.deepEqual(C.normalizeExcludedSites(null), []);
+  assert.deepEqual(C.normalizeExcludedSites("chatgpt.com"), []);
+});
+
 test("word/Unicode counting and English page gate", () => {
   assert.equal(C.wordCount(" one\n two \tthree "), 3);
   assert.equal(C.charCount("a😀"), 2);

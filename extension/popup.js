@@ -5,6 +5,7 @@
   $("extension-id").textContent = chrome.runtime.id;
   $("install-command").textContent = `"$HOME/Library/Application Support/Deckard/current/bin/deckard" install --extension-id ${chrome.runtime.id}`;
   let tabId;
+  let hostname;
   let busy = false;
   let editingThreshold = false;
   let generation = 0;
@@ -20,6 +21,14 @@
   function renderEnabled(enabled) {
     $("enabled").checked = enabled;
     $("toggle-label").textContent = enabled ? "On" : "Off";
+  }
+  function renderSite(config) {
+    $("site-excluded").checked = Boolean(hostname && config.excludedSites?.includes(hostname));
+  }
+  function disableControls(disabled) {
+    $("enabled").disabled = disabled;
+    $("threshold").disabled = disabled;
+    $("site-excluded").disabled = disabled || !hostname;
   }
   function renderThreshold(value) {
     const threshold = C.normalizeSettings({ flagThreshold: value }).flagThreshold;
@@ -70,9 +79,11 @@
     if (busy || current !== generation) return;
     renderEnabled(config.enabled);
     renderThreshold(config.flagThreshold);
+    renderSite(config);
     $("setup").hidden = status.state !== "error";
     $("status").textContent = actionError || (status.state === "error"
-      ? status.detail || "Scan failed." : status.state === "unsupported" ? "Page unavailable." : "");
+      ? status.detail || "Scan failed." : status.state === "unsupported" ? "Page unavailable."
+        : status.state === "excluded" ? status.detail : "");
     $("status").hidden = !$("status").textContent;
     $("progress").textContent = config.enabled && (status.scannedWords !== undefined || status.analyzed !== undefined)
       ? `${(status.scannedWords || 0).toLocaleString("en-US")}/${(status.totalWords || 0).toLocaleString("en-US")} processed`
@@ -94,8 +105,7 @@
     // Already-granted access does not prompt again.
     const grant = enabled ? chrome.permissions.request({ origins: C.HOST_PERMISSIONS }) : Promise.resolve(true);
     busy = true;
-    $("enabled").disabled = true;
-    $("threshold").disabled = true;
+    disableControls(true);
     void (async () => {
       try {
         if (!(await grant)) throw new Error("Access declined. Deckard remains Off.");
@@ -109,8 +119,31 @@
         return;
       } finally {
         busy = false;
-        $("enabled").disabled = false;
-        $("threshold").disabled = false;
+        disableControls(false);
+      }
+      await refresh();
+    })().catch(error);
+  });
+  $("site-excluded").addEventListener("change", () => {
+    if (busy || !hostname) return;
+    const excluded = $("site-excluded").checked;
+    generation++;
+    actionError = "";
+    busy = true;
+    disableControls(true);
+    renderResults({}, false);
+    $("progress").textContent = "";
+    $("scan-progress").hidden = true;
+    void (async () => {
+      try {
+        renderSite(await request({ type: "SET_SITE_EXCLUDED", tabId, hostname, excluded }));
+      } catch (e) {
+        actionError = e.message;
+        error(e);
+        renderSite(await request({ type: "GET_SETTINGS" }));
+      } finally {
+        busy = false;
+        disableControls(false);
       }
       await refresh();
     })().catch(error);
@@ -127,8 +160,7 @@
     generation++;
     actionError = "";
     busy = true;
-    $("enabled").disabled = true;
-    $("threshold").disabled = true;
+    disableControls(true);
     void (async () => {
       try {
         const config = await request({ type: "SET_THRESHOLD", flagThreshold: value });
@@ -140,8 +172,7 @@
         renderThreshold(config.flagThreshold);
       } finally {
         busy = false;
-        $("enabled").disabled = false;
-        $("threshold").disabled = false;
+        disableControls(false);
       }
       await refresh();
     })().catch(error);
@@ -152,10 +183,12 @@
     const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
     const safe = tab && !tab.incognito && C.originOf(tab.url);
     tabId = safe ? tab.id : undefined;
+    hostname = safe ? C.hostnameOf(tab.url) : null;
+    $("site-preference").hidden = !hostname;
+    $("site-hostname").textContent = hostname || "";
     $("page-title").textContent = safe ? (tab.title || "Current page").slice(0, 200) : "Page unavailable or private";
     await refresh();
-    $("enabled").disabled = false;
-    $("threshold").disabled = false;
+    disableControls(false);
     polling = setInterval(() => { void refresh().catch(error); }, 1500);
   }
   window.addEventListener("pagehide", () => clearInterval(polling));

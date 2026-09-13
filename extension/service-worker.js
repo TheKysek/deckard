@@ -14,6 +14,8 @@ const sessionId = crypto.randomUUID();
 let tabSequence = 0;
 let enabled = false;
 let flagThreshold = C.FLAG_THRESHOLD;
+let excludedSites = new Set();
+const siteVersions = new Map();
 let revision = 0;
 let synchronization = Promise.resolve();
 let persistence = Promise.resolve();
@@ -21,6 +23,8 @@ let persistence = Promise.resolve();
 function safeTab(tab) {
   return tab && Number.isInteger(tab.id) && !tab.incognito && C.originOf(tab.url);
 }
+function siteExcluded(url) { return excludedSites.has(C.hostnameOf(url)); }
+function siteVersion(url) { return siteVersions.get(C.hostnameOf(url)) || 0; }
 function contentSender(sender) {
   return sender.id === chrome.runtime.id && sender.tab && !sender.tab.incognito
     && sender.frameId === 0 && validRun(sender.documentId)
@@ -135,11 +139,20 @@ async function restoreTabs(generation = revision) {
 }
 async function activateTab(tab, generation = revision) {
   if (!enabled || generation !== revision || !safeTab(tab)) return;
+  if (siteExcluded(tab.url)) {
+    const run = runs.get(tab.id);
+    if (run && !siteExcluded(run.url)) return;
+    cancelTab(tab.id);
+    void sendToTab(tab.id, { type: "SETTINGS_CHANGED" });
+    return;
+  }
   const tabGeneration = tabGenerations.get(tab.id);
+  const version = siteVersion(tab.url);
   if (!runs.has(tab.id)) updateBadge(tab.id);
   try {
     await chrome.scripting.executeScript({ target: { tabId: tab.id, frameIds: [0] }, files: ["core.js", "content.js"] });
-    if (enabled && generation === revision && tabGeneration === tabGenerations.get(tab.id)) {
+    if (enabled && generation === revision && tabGeneration === tabGenerations.get(tab.id)
+      && version === siteVersion(tab.url) && !siteExcluded(tab.url)) {
       await sendToTab(tab.id, { type: "START" });
     }
   } catch { /* Restricted pages (including the Chrome Web Store) cannot be injected. */ }
@@ -170,13 +183,14 @@ function scheduleSync() {
 }
 const ready = (async () => {
   const generation = revision;
-  const stored = await chrome.storage.local.get(["deckardSettings", "deckardFlagThreshold"]);
+  const stored = await chrome.storage.local.get(["deckardSettings", "deckardFlagThreshold", "deckardExcludedSites"]);
   const config = C.normalizeSettings({
     ...stored.deckardSettings,
     enabled: stored.deckardSettings?.enabled === undefined ? true : stored.deckardSettings.enabled,
     flagThreshold: stored.deckardFlagThreshold,
   });
   flagThreshold = config.flagThreshold;
+  excludedSites = new Set(C.normalizeExcludedSites(stored.deckardExcludedSites));
   const allowed = config.enabled && await hasPermission();
   if (generation !== revision) return;
   enabled = Boolean(allowed);
@@ -216,7 +230,42 @@ async function handlePopup(message) {
   if (message.type === "SET_ENABLED") return setEnabled(message.enabled);
   await ready;
   switch (message.type) {
-    case "GET_SETTINGS": return { enabled, flagThreshold };
+    case "GET_SETTINGS": return { enabled, flagThreshold, excludedSites: [...excludedSites] };
+    case "SET_SITE_EXCLUDED": {
+      if (!Number.isInteger(message.tabId) || typeof message.excluded !== "boolean"
+        || typeof message.hostname !== "string") {
+        throw new NativeError("invalid_request", "Invalid site preference.");
+      }
+      persistence = persistence.catch(() => {}).then(async () => {
+        const tab = await chrome.tabs.get(message.tabId);
+        if (!safeTab(tab) || C.hostnameOf(tab.url) !== message.hostname) {
+          throw new NativeError("invalid_request", "This page has changed or is unavailable. Reopen the popup.");
+        }
+        const next = new Set(excludedSites);
+        if (message.excluded) next.add(message.hostname);
+        else next.delete(message.hostname);
+        await chrome.storage.local.set({ deckardExcludedSites: [...next] });
+        excludedSites = next;
+        siteVersions.set(message.hostname, siteVersion(tab.url) + 1);
+        for (const [tabId, run] of runs) {
+          if (siteExcluded(run.url)) {
+            cancelTab(tabId);
+            void sendToTab(tabId, { type: "SETTINGS_CHANGED" }, run.documentId);
+          }
+        }
+      });
+      await persistence;
+      // Re-read the latest preference in each document; slow tabs must not block saving.
+      for (const tab of await chrome.tabs.query({})) {
+        if (!safeTab(tab) || C.hostnameOf(tab.url) !== message.hostname) continue;
+        if (siteExcluded(tab.url)) {
+          void sendToTab(tab.id, { type: "SETTINGS_CHANGED" });
+        } else {
+          void activateTab(tab);
+        }
+      }
+      return { enabled, flagThreshold, excludedSites: [...excludedSites] };
+    }
     case "SET_THRESHOLD": {
       if (!C.validThreshold(message.flagThreshold)) throw new NativeError("invalid_request", "Threshold must be between 70 and 99.");
       const value = message.flagThreshold;
@@ -237,6 +286,7 @@ async function handlePopup(message) {
       const tab = await chrome.tabs.get(message.tabId);
       if (!safeTab(tab)) return { state: "unsupported", detail: "This page cannot be scanned. Normal non-private HTTP(S) pages only." };
       if (!enabled || generation !== revision) return { state: "off", detail: "Off." };
+      if (siteExcluded(tab.url)) return { state: "excluded", detail: "Do not flag is on for this site. No analysis runs." };
       let run = runs.get(tab.id);
       if (!run) {
         await activateTab(tab, generation);
@@ -284,7 +334,7 @@ async function authorizePage(tabId, documentId, url) {
   }
 }
 async function authorizeRun(tabId, run, sender, message) {
-  const current = () => enabled && run && runs.get(tabId) === run
+  const current = () => enabled && run && !siteExcluded(run.url) && runs.get(tabId) === run
     && (!sender || (run.runId === message.runId && run.documentId === sender.documentId
       && run.url === message.page_url));
   if (!current()) throw new NativeError("cancelled", "Scan is no longer current.");
@@ -316,22 +366,26 @@ async function handleContent(message, sender) {
     case "GET_CONFIG": {
       const generation = revision;
       const tabGeneration = tabGenerations.get(tabId);
-      if (enabled) {
+      const version = siteVersion(message.page_url);
+      if (enabled && !siteExcluded(message.page_url)) {
         if (!(await hasPermission())) throw new NativeError("cancelled", "Page access was revoked.");
         await authorizePage(tabId, sender.documentId, message.page_url);
-        if (generation !== revision || tabGeneration !== tabGenerations.get(tabId)) {
+        if (generation !== revision || tabGeneration !== tabGenerations.get(tabId)
+          || version !== siteVersion(message.page_url)) {
           throw new NativeError("cancelled", "This page has changed.");
         }
       }
-      return { enabled, flagThreshold, sessionId };
+      return { enabled: enabled && !siteExcluded(message.page_url), flagThreshold, sessionId };
     }
     case "BEGIN_SCAN": {
       if (!validRun(message.runId)) throw new NativeError("invalid_request", "Invalid scan.");
       const generation = revision;
       const tabGeneration = tabGenerations.get(tabId);
-      const allowed = enabled && await hasPermission();
+      const version = siteVersion(message.page_url);
+      const allowed = enabled && !siteExcluded(message.page_url) && await hasPermission();
       if (allowed) await authorizePage(tabId, sender.documentId, message.page_url);
-      if (!allowed || !enabled || generation !== revision || tabGeneration !== tabGenerations.get(tabId)) {
+      if (!allowed || !enabled || siteExcluded(message.page_url) || version !== siteVersion(message.page_url)
+        || generation !== revision || tabGeneration !== tabGenerations.get(tabId)) {
         throw new NativeError("cancelled", "Scanning is off or this page has changed.");
       }
       // A stale BEGIN must not cancel the current document's run.

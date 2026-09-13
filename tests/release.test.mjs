@@ -21,7 +21,7 @@ test("real release archive installs, upgrades, uninstalls and reinstalls through
     const profile = path.join(user, ".zshrc");
     const original = "# unrelated settings\nexport PERSONAL_TEST_SETTING=preserved";
     fs.writeFileSync(profile, original);
-    const archiveName = "deckard-v0.6.0-macos-arm64.tar.gz";
+    const archiveName = "deckard-v0.6.1-macos-arm64.tar.gz";
     const archive = path.resolve(release, archiveName);
     assert.ok(fs.statSync(archive).size < archiveSizeLimit);
     const listing = spawnSync("/usr/bin/tar", ["-tzf", archive], {
@@ -45,7 +45,7 @@ while [ "$#" -gt 0 ]; do
     *) shift ;;
   esac
 done
-[ "$url" = "https://github.com/sgoedecke/deckard/releases/download/v0.6.0/${archiveName}" ]
+[ "$url" = "https://github.com/sgoedecke/deckard/releases/download/v0.6.1/${archiveName}" ]
 [ -n "$output" ]
 printf '%s\\n' "$url" >> "$CURL_LOG"
 cp "$RELEASE_ARCHIVE" "$output"
@@ -76,7 +76,7 @@ cp "$RELEASE_ARCHIVE" "$output"
     const firstProfile = fs.readFileSync(profile, "utf8");
     const extension = JSON.parse(fs.readFileSync(path.join(prefix, "extension/manifest.json")));
     assert.equal(extension.name, "Deckard");
-    assert.equal(extension.version, "0.6.0");
+    assert.equal(extension.version, "0.6.1");
     assert.deepEqual(JSON.parse(fs.readFileSync(path.join(prefix, "current/share/licenses/model-assets.json"))),
       JSON.parse(fs.readFileSync(path.join(root, "native-cli/model-assets.json"))));
     assert.deepEqual(JSON.parse(fs.readFileSync(registration)).allowed_origins,

@@ -15,7 +15,9 @@ function event() {
 }
 async function harness(initial = {}, options = {}) {
   const events = { message: event(), removed: event(), updated: event(), permissions: event() };
-  const stored = { deckardSettings: initial, ...(options.flagThreshold !== undefined ? { deckardFlagThreshold: options.flagThreshold } : {}) };
+  const stored = { deckardSettings: initial,
+    ...(options.flagThreshold !== undefined ? { deckardFlagThreshold: options.flagThreshold } : {}),
+    ...(options.excludedSites !== undefined ? { deckardExcludedSites: options.excludedSites } : {}) };
   const granted = new Set(options.grants || (initial.enabled ? origins : []));
   const tabs = new Map((options.tabs || [{ id: 1, url: "https://example.com/article", incognito: false }])
     .map(tab => [tab.id, tab]));
@@ -183,6 +185,140 @@ test("invalid or failed threshold writes never change the active preference", as
   assert.equal((await h.send({ type: "SET_THRESHOLD", flagThreshold: 0.8 })).ok, false);
   assert.equal((await h.send({ type: "GET_SETTINGS" })).result.flagThreshold, 0.85);
   assert.equal(h.stored.deckardFlagThreshold, 0.85);
+});
+
+test("excluded hostnames persist across restarts, On/Off, and threshold changes", async () => {
+  const h = await harness({ enabled: true });
+  const preference = { type: "SET_SITE_EXCLUDED", tabId: 1, hostname: "example.com", excluded: true };
+  assert.equal((await h.send(preference)).ok, true);
+  await h.send({ type: "SET_THRESHOLD", flagThreshold: 0.85 });
+  await h.send({ type: "SET_ENABLED", enabled: false });
+  await h.send({ type: "SET_ENABLED", enabled: true });
+  assert.deepEqual(Array.from(h.stored.deckardExcludedSites), ["example.com"]);
+  assert.equal(h.stored.deckardFlagThreshold, 0.85);
+  const restarted = await harness(h.stored.deckardSettings, {
+    excludedSites: h.stored.deckardExcludedSites, flagThreshold: h.stored.deckardFlagThreshold,
+  });
+  assert.deepEqual(Array.from((await restarted.send({ type: "GET_SETTINGS" })).result.excludedSites), ["example.com"]);
+  assert.equal((await restarted.send({ type: "GET_CONFIG" }, restarted.content)).result.enabled, false);
+  assert.equal((await restarted.send({ type: "STATUS", tabId: 1 })).result.state, "excluded");
+  assert.equal((await restarted.send({ type: "BEGIN_SCAN", runId: "run" }, restarted.content)).error.code, "cancelled");
+  assert.equal(restarted.injections.length, 0);
+  assert.equal(restarted.ports.length, 0);
+});
+
+test("exclusions stop all matching tabs, cancel native work, and leave other hostnames alone", async () => {
+  const h = await harness({ enabled: true }, { tabs: [
+    { id: 1, url: "https://example.com/article" },
+    { id: 2, url: "http://example.com:8080/other" },
+    { id: 3, url: "https://sub.example.com/article" },
+    { id: 4, url: "https://notexample.com/article" },
+    { id: 5, url: "https://example.com/private", incognito: true },
+  ] });
+  const senders = [1, 2, 3, 4].map(id => ({ ...h.content, tab: h.tabs.get(id),
+    url: h.tabs.get(id).url, documentId: `document-${id}` }));
+  for (const sender of senders) {
+    await h.send({ type: "BEGIN_SCAN", runId: "run" }, sender);
+  }
+  const active = h.send({ type: "ANALYZE", runId: "run", text: "private text" }, senders[0]);
+  const queued = h.send({ type: "ANALYZE", runId: "run", text: "other private text" }, senders[1]);
+  await h.settle();
+  h.messages.length = 0;
+  assert.equal((await h.send({ type: "SET_SITE_EXCLUDED", tabId: 1, hostname: "example.com", excluded: true })).ok, true);
+  assert.equal((await active).error.code, "cancelled");
+  assert.equal((await queued).error.code, "cancelled");
+  await h.settle();
+  assert.deepEqual([...new Set(h.messages.map(entry => entry.id))], [1, 2]);
+  for (const sender of senders.slice(0, 2)) {
+    assert.equal((await h.send({ type: "GET_CONFIG" }, sender)).result.enabled, false);
+    assert.equal((await h.send({ type: "PAGE_PROGRESS", runId: "run", status: progress() }, sender)).error.code, "cancelled");
+    assert.equal(h.badges.get(sender.tab.id).text, "");
+  }
+  for (const sender of senders.slice(2)) {
+    assert.equal((await h.send({ type: "GET_CONFIG" }, sender)).result.enabled, true);
+    assert.equal((await h.send({ type: "PAGE_PROGRESS", runId: "run", status: progress() }, sender)).ok, true);
+  }
+  assert.equal(JSON.stringify(h.stored).includes("private text"), false);
+});
+
+test("removing a site exclusion resumes existing tabs only when globally On", async () => {
+  for (const enabled of [false, true]) {
+    const h = await harness({ enabled }, { excludedSites: ["example.com", "other.com"] });
+    const result = await h.send({ type: "SET_SITE_EXCLUDED", tabId: 1, hostname: "example.com", excluded: false });
+    await h.settle();
+    assert.deepEqual(Array.from(result.result.excludedSites), ["other.com"]);
+    assert.equal((await h.send({ type: "GET_CONFIG" }, h.content)).result.enabled, enabled);
+    assert.equal(h.injections.length, enabled ? 1 : 0);
+    assert.equal(h.messages.some(entry => entry.message.type === "START"), enabled);
+  }
+});
+
+test("invalid site requests and failed writes do not change preferences or stop runs", async () => {
+  const h = await harness({ enabled: true });
+  await h.send({ type: "BEGIN_SCAN", runId: "run" }, h.content);
+  const preference = { type: "SET_SITE_EXCLUDED", tabId: 1, hostname: "example.com", excluded: true };
+  for (const change of [{ tabId: undefined }, { hostname: "other.com" }, { excluded: "yes" }]) {
+    assert.equal((await h.send({ ...preference, ...change })).error.code, "invalid_request");
+  }
+  assert.equal((await h.send(preference, h.content)).error.code, "invalid_request");
+  h.chrome.storage.local.set = async () => { throw new Error("Write failed"); };
+  assert.equal((await h.send(preference)).ok, false);
+  assert.deepEqual(Array.from((await h.send({ type: "GET_SETTINGS" })).result.excludedSites), []);
+  assert.equal((await h.send({ type: "PAGE_PROGRESS", runId: "run", status: progress() }, h.content)).ok, true);
+});
+
+test("site preferences cannot target private or unsupported tabs", async () => {
+  for (const tab of [{ id: 1, url: "https://example.com", incognito: true }, { id: 1, url: "chrome://settings" }]) {
+    const h = await harness({ enabled: true }, { tabs: [tab] });
+    assert.equal((await h.send({ type: "SET_SITE_EXCLUDED", tabId: 1, hostname: "example.com", excluded: true })).ok, false);
+    assert.equal(h.stored.deckardExcludedSites, undefined);
+  }
+});
+
+test("excluding a site invalidates a pending BEGIN even if it is re-enabled before authorization finishes", async () => {
+  const h = await harness({ enabled: true });
+  const contains = h.chrome.permissions.contains;
+  let release;
+  h.chrome.permissions.contains = () => new Promise(resolve => { release = resolve; });
+  const pending = h.send({ type: "BEGIN_SCAN", runId: "old" }, h.content);
+  await h.settle();
+  h.chrome.permissions.contains = contains;
+  const preference = { type: "SET_SITE_EXCLUDED", tabId: 1, hostname: "example.com" };
+  await h.send({ ...preference, excluded: true });
+  await h.send({ ...preference, excluded: false });
+  release(true);
+  assert.equal((await pending).error.code, "cancelled");
+  assert.equal((await h.send({ type: "BEGIN_SCAN", runId: "new" }, h.content)).ok, true);
+});
+
+test("concurrent site saves preserve both hostnames and frozen tabs do not block saving", async () => {
+  const h = await harness({ enabled: true }, { tabs: [
+    { id: 1, url: "https://example.com/article" }, { id: 2, url: "https://other.com" },
+  ] });
+  h.chrome.tabs.sendMessage = () => new Promise(() => {});
+  const results = await Promise.all([
+    h.send({ type: "SET_SITE_EXCLUDED", tabId: 1, hostname: "example.com", excluded: true }),
+    h.send({ type: "SET_SITE_EXCLUDED", tabId: 2, hostname: "other.com", excluded: true }),
+  ]);
+  assert.ok(results.every(result => result.ok));
+  assert.deepEqual(Array.from(h.stored.deckardExcludedSites), ["example.com", "other.com"]);
+});
+
+test("a delayed site notification cannot cancel a tab that navigated to another hostname", async () => {
+  const h = await harness({ enabled: true });
+  let release;
+  const snapshot = [{ ...h.tabs.get(1) }];
+  h.chrome.tabs.query = () => new Promise(resolve => { release = () => resolve(snapshot); });
+  const saving = h.send({ type: "SET_SITE_EXCLUDED", tabId: 1, hostname: "example.com", excluded: true });
+  await h.settle();
+  const url = "https://other.com/article";
+  h.tabs.get(1).url = url;
+  h.documents.get(1).url = url;
+  const sender = { ...h.content, url };
+  assert.equal((await h.send({ type: "BEGIN_SCAN", runId: "destination" }, sender)).ok, true);
+  release();
+  assert.equal((await saving).ok, true);
+  assert.equal((await h.send({ type: "PAGE_PROGRESS", runId: "destination", status: progress() }, sender)).ok, true);
 });
 
 test("a frozen tab cannot block threshold saving or switching Off", async () => {

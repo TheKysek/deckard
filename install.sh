@@ -50,7 +50,7 @@ deckard_bootstrap() (
     if ! { exec 3<>/dev/tty; } 2>/dev/null; then
       fail 'No controlling terminal. Re-run with --yes and a supported --shell (or SHELL).'
     fi
-    printf 'Install Deckard v0.6.0 (including Core ML model weights) and configure shell %s? [y/N] ' "$shell_choice" >&3
+    printf 'Install Deckard v0.6.1 (including Core ML model weights) and configure shell %s? [y/N] ' "$shell_choice" >&3
     answer=
     IFS= read -r answer <&3 || fail 'Confirmation could not be read.'
     exec 3>&-
@@ -67,12 +67,12 @@ deckard_bootstrap() (
   trap 'rm -rf -- "$work"' EXIT
   trap 'exit 130' INT
   trap 'exit 143' TERM HUP
-  archive="$work/deckard-v0.6.0-macos-arm64.tar.gz"
-  url='https://github.com/sgoedecke/deckard/releases/download/v0.6.0/deckard-v0.6.0-macos-arm64.tar.gz'
-  printf 'Downloading Deckard v0.6.0…\n'
+  archive="$work/deckard-v0.6.1-macos-arm64.tar.gz"
+  url='https://github.com/sgoedecke/deckard/releases/download/v0.6.1/deckard-v0.6.1-macos-arm64.tar.gz'
+  printf 'Downloading Deckard v0.6.1…\n'
   curl --fail --location --proto '=https' --proto-redir '=https' \
     --connect-timeout 30 --max-time 1800 --output "$archive" "$url" ||
-    fail 'Download failed. The pinned v0.6.0 release must be published before this installer can be used.'
+    fail 'Download failed. The pinned v0.6.1 release must be published before this installer can be used.'
   archive_bytes=$(wc -c < "$archive")
   [ "$archive_bytes" -gt 0 ] && [ "$archive_bytes" -lt 2147483648 ] ||
     fail 'Release archive must be under 2147483648 bytes (2 GiB).'

@@ -25,6 +25,15 @@
       return ["http:", "https:"].includes(url.protocol) ? url.origin : null;
     } catch { return null; }
   }
+  function hostnameOf(value) {
+    const origin = originOf(value);
+    return origin ? new URL(origin).hostname : null;
+  }
+  function normalizeExcludedSites(value) {
+    if (!Array.isArray(value)) return [];
+    return [...new Set(value.filter(host => typeof host === "string" && host.length <= 253 && !host.includes("*")
+      && hostnameOf(`https://${host}`) === host.toLowerCase()).map(host => host.toLowerCase()))];
+  }
   function pageKey(value) {
     const url = new URL(value);
     // Ordinary in-page anchors do not replenish the budget; hash-router pages do.
@@ -319,7 +328,7 @@
   }
   globalThis.DeckardCore = Object.freeze({
     MAX_CHARS, MIN_WORDS, MAX_PAGE_WORDS, SCANNER_VERSION, FLAG_THRESHOLD, PROTOCOL_VERSION, MODEL, MODEL_REVISION, POLICY,
-    validModelIdentity, validThreshold, HOST_PERMISSIONS, EXCLUDED, originOf, pageKey,
+    validModelIdentity, validThreshold, HOST_PERMISSIONS, EXCLUDED, originOf, hostnameOf, normalizeExcludedSites, pageKey,
     normalizeSettings, wordCount, charCount, englishDocument, isVisible,
     readText, selectBlocks, groupCurrent, shouldFlag, contextSources, contextBlocks, validPlan,
   });

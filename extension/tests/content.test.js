@@ -299,6 +299,56 @@ test("duplicate starts retain the mark without adding controls or rescanning", a
   assert.equal(h.root.children.length, 2);
 });
 
+test("site exclusion notifications restore existing marks and unexcluding reuses cached results", async () => {
+  const h = await harness({ auto: true });
+  await h.finish();
+  assert.equal(h.blocks[0].classes.size, 1);
+  const analyses = h.analyses.length;
+  h.settings.enabled = false;
+  await h.send({ type: "SETTINGS_CHANGED" });
+  assert.equal(h.blocks[0].classes.size, 0);
+  assert.equal(h.observer.active, false);
+  assert.equal((await h.send({ type: "PAGE_STATUS" })).state, "stopped");
+  assert.equal(h.root.children.some(node => node.tag === "style"), false);
+  await h.mutate(h.blocks[0]);
+  assert.equal(h.analyses.length, analyses);
+  h.settings.enabled = true;
+  await h.send({ type: "START" });
+  await h.settle();
+  assert.equal(h.blocks[0].classes.size, 1);
+  assert.equal(h.analyses.length, analyses);
+});
+
+test("site exclusion rejects outstanding inference and late enabled configuration", async () => {
+  const h = await harness({ auto: true });
+  const original = h.context.chrome.runtime.sendMessage;
+  let release;
+  h.context.chrome.runtime.sendMessage = message => message.type === "GET_CONFIG"
+    ? new Promise(resolve => { release = resolve; }) : original(message);
+  const stale = h.send({ type: "SETTINGS_CHANGED" });
+  await h.settle();
+  h.context.chrome.runtime.sendMessage = original;
+  h.settings.enabled = false;
+  await h.send({ type: "SETTINGS_CHANGED" });
+  release({ ok: true, result: { enabled: true } });
+  await stale;
+  await h.finish();
+  assert.equal(h.blocks[0].classes.size, 0);
+  assert.equal(h.analyses.length, 1);
+  assert.equal((await h.send({ type: "PAGE_STATUS" })).state, "stopped");
+});
+
+test("excluded pages do not extract text or start inference on injection or navigation", async () => {
+  const h = await harness({ getConfig: () => Promise.resolve({ ok: true, result: { enabled: false } }) });
+  h.context.location.href = "https://example.com/next";
+  h.navigationEvents.get("currententrychange")();
+  await h.settle();
+  assert.equal(h.analyses.length, 0);
+  assert.equal(h.textReads, 0);
+  assert.equal(h.requests.some(message => ["BEGIN_SCAN", "PLAN_CONTEXT", "ANALYZE"].includes(message.type)), false);
+  assert.equal(h.observer.active, false);
+});
+
 test("a complete 50-word passage is scored and marked without changing the cutoff", async () => {
   const h = await harness({ budget: 50 });
   h.blocks[0].text = "word ".repeat(50).trim();

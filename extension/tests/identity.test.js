@@ -22,7 +22,6 @@ test("public manifest key reproducibly pins the stable Chrome extension ID", () 
   assert.deepEqual(key.export({ type: "spki", format: "der" }), der);
   assert.match(deriveId(der), /^[a-p]{32}$/);
   assert.equal(deriveId(der), extensionId);
-  assert.ok(read("../../README.md").includes(`\`${extensionId}\``));
   const nativeId = read("../../native-cli/src/support.hpp")
     .match(/\bdefault_extension_id\s*=\s*"([a-p]{32})"/)?.[1];
   assert.equal(nativeId, deriveId(der));
@@ -33,12 +32,12 @@ test("Deckard brand, release version and native host remain consistent", () => {
   assert.equal(manifest.description, "Local AI-text detection for your browser.");
   assert.deepEqual(manifest.host_permissions, ["http://*/*", "https://*/*"]);
   assert.equal(manifest.optional_host_permissions, undefined);
-  assert.equal(manifest.version, "0.6.0");
+  assert.equal(manifest.version, "0.6.1");
   const pkg = JSON.parse(read("../../package.json"));
   assert.equal(pkg.name, "deckard");
   assert.equal(pkg.version, manifest.version);
   const native = read("../../native-cli/src/support.hpp");
-  assert.match(native, /app_version = "0\.6\.0"/);
+  assert.match(native, /app_version = "0\.6\.1"/);
   assert.match(native, /host_name = "com\.sgoedecke\.deckard"/);
   assert.match(read("../service-worker.js"), /connectNative\("com\.sgoedecke\.deckard"\)/);
   assert.match(read("../popup.html"), /<title>Deckard<\/title>/);

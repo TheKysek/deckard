@@ -6,7 +6,7 @@ import "../core.js";
 
 const source = fs.readFileSync(new URL("../popup.js", import.meta.url), "utf8");
 const html = fs.readFileSync(new URL("../popup.html", import.meta.url), "utf8");
-async function harness({ enabled = false, granted = true, flagThreshold = globalThis.DeckardCore.FLAG_THRESHOLD,
+async function harness({ enabled = false, granted = true, flagThreshold = globalThis.DeckardCore.FLAG_THRESHOLD, excludedSites = [],
   tab = { id: 1, url: "https://example.com", title: "Example" } } = {}) {
   const element = () => ({
     textContent: "", checked: false, disabled: true, events: {}, children: [],
@@ -24,8 +24,15 @@ async function harness({ enabled = false, granted = true, flagThreshold = global
         calls.push(message);
         if (message.type === "SET_ENABLED") enabled = message.enabled;
         if (message.type === "SET_THRESHOLD") flagThreshold = message.flagThreshold;
+        if (message.type === "SET_SITE_EXCLUDED") {
+          excludedSites = excludedSites.filter(host => host !== message.hostname);
+          if (message.excluded) excludedSites.push(message.hostname);
+        }
         return { ok: true, result: message.type === "STATUS"
-          ? { state: enabled ? "done" : "off", detail: enabled ? "Watching." : "Restored." } : { enabled, flagThreshold } };
+          ? enabled && excludedSites.includes(globalThis.DeckardCore.hostnameOf(tab.url))
+            ? { state: "excluded", detail: "Do not flag is on for this site. No analysis runs." }
+            : { state: enabled ? "done" : "off", detail: enabled ? "Watching." : "Restored." }
+          : { enabled, flagThreshold, excludedSites } };
       },
     },
     permissions: { request: options => { calls.push({ permission: options }); return Promise.resolve(granted); } },
@@ -46,8 +53,8 @@ async function harness({ enabled = false, granted = true, flagThreshold = global
   return { elements, calls, chrome, toggle, settle, poll: () => poll() };
 }
 
-test("popup has one On/Off switch, a threshold slider, and read-only setup", async () => {
-  assert.equal([...html.matchAll(/<input\b/g)].length, 2);
+test("popup has an On/Off switch, site exclusion, threshold slider, and read-only setup", async () => {
+  assert.equal([...html.matchAll(/<input\b/g)].length, 3);
   assert.match(html, /type="range" min="70" max="99" step="any"/);
   assert.match(html, /role="switch" aria-label="Enable Deckard"/);
   assert.doesNotMatch(html, /<select\b|<textarea\b|type="number"|<details\b/);
@@ -59,6 +66,44 @@ test("popup has one On/Off switch, a threshold slider, and read-only setup", asy
   assert.equal(h.elements.get("install-command").textContent,
     '"$HOME/Library/Application Support/Deckard/current/bin/deckard" install --extension-id test-id');
   assert.equal(h.elements.get("setup").hidden, true);
+});
+
+test("site exclusion is reversible, hostname-scoped, and does not ask for permissions", async () => {
+  const h = await harness({ enabled: true });
+  assert.equal(h.elements.get("site-preference").hidden, false);
+  assert.equal(h.elements.get("site-hostname").textContent, "example.com");
+  assert.equal(h.elements.get("site-excluded").checked, false);
+  for (const excluded of [true, false]) {
+    h.elements.get("site-excluded").checked = excluded;
+    h.elements.get("site-excluded").events.change();
+    assert.equal(h.elements.get("enabled").disabled, true);
+    await h.settle();
+    const call = h.calls.filter(call => call.type === "SET_SITE_EXCLUDED").at(-1);
+    assert.equal(call.hostname, "example.com");
+    assert.equal(call.tabId, 1);
+    assert.equal(call.excluded, excluded);
+    assert.equal(h.elements.get("site-excluded").checked, excluded);
+    assert.equal(h.elements.get("site-excluded").disabled, false);
+    assert.equal(h.elements.get("enabled").checked, true);
+    assert.equal(h.elements.get("status").hidden, !excluded);
+  }
+  assert.equal(h.calls.some(call => call.permission), false);
+});
+
+test("saved exclusions are shown while Off and failed saves restore the persisted preference", async () => {
+  const h = await harness({ excludedSites: ["example.com"] });
+  assert.equal(h.elements.get("site-excluded").checked, true);
+  assert.equal(h.elements.get("site-excluded").disabled, false);
+  const original = h.chrome.runtime.sendMessage;
+  h.chrome.runtime.sendMessage = message => message.type === "SET_SITE_EXCLUDED"
+    ? Promise.resolve({ ok: false, error: { message: "Settings write failed." } }) : original(message);
+  h.elements.get("site-excluded").checked = false;
+  h.elements.get("site-excluded").events.change();
+  await h.settle();
+  assert.equal(h.elements.get("site-excluded").checked, true);
+  assert.match(h.elements.get("status").textContent, /Settings write failed/);
+  h.poll(); await h.settle();
+  assert.match(h.elements.get("status").textContent, /Settings write failed/);
 });
 
 test("the slider preserves the precise default and only saves when committed", async () => {
@@ -226,6 +271,8 @@ test("private and excluded pages never expose a title or send their tab ID", asy
     const h = await harness({ tab });
     assert.equal(h.elements.get("page-title").textContent, "Page unavailable or private");
     assert.equal(h.calls.find(call => call.type === "STATUS").tabId, undefined);
+    assert.equal(h.elements.get("site-preference").hidden, true);
+    assert.equal(h.elements.get("site-excluded").disabled, true);
   }
 });
 
