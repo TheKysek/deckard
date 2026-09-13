@@ -4,6 +4,7 @@
   globalThis.__deckardLocal = true;
   const C = globalThis.DeckardCore;
   if (!C || !C.originOf(location.href) || window.top !== window) return;
+  const runtime = chrome.runtime;
   const suffix = crypto.randomUUID().replaceAll("-", "");
   const flagClass = `deckard-marked-${suffix}`;
   const records = new Map();
@@ -23,6 +24,7 @@
   let refreshSequence = 0;
   let workerSession;
   let stopped = true;
+  let invalidated = false;
   let running = false;
   let pending = false;
   let usedWords = 0;
@@ -39,16 +41,28 @@
   let status = { state: "idle", analyzed: 0, partial: 0, skipped: 0, marked: 0, limited: false,
     scannedWords: 0, totalWords: 0, usedWords: 0, findings: [], detail: "" };
   const view = window;
-  function request(message) {
-    return chrome.runtime.sendMessage({ ...message, protocol_version: C.PROTOCOL_VERSION,
-      scanner_version: C.SCANNER_VERSION, page_url: location.href }).then(response => {
+  async function request(message) {
+    try {
+      if (invalidated || !runtime.id) throw new Error("Extension context invalidated.");
+      // Chrome can throw synchronously after an extension reload, before returning a promise.
+      const response = await runtime.sendMessage({ ...message, protocol_version: C.PROTOCOL_VERSION,
+        scanner_version: C.SCANNER_VERSION, page_url: location.href });
+      if (invalidated || !runtime.id) throw new Error("Extension context invalidated.");
       if (!response?.ok) {
         const error = new Error(response?.error?.message || "Extension unavailable. Reload the page.");
         error.code = response?.error?.code || "extension_error";
         throw error;
       }
       return response.result;
-    });
+    } catch (error) {
+      if (invalidated || !runtime.id || /^Extension context invalidated\.?$/i.test(error?.message || "")) {
+        invalidate();
+        const unavailable = new Error("Deckard was reloaded. Reload this page to reconnect.");
+        unavailable.code = "extension_context_invalidated";
+        throw unavailable;
+      }
+      throw error;
+    }
   }
   function owned(tag) {
     const node = document.createElement(tag);
@@ -184,14 +198,28 @@
     structuralRecords.clear();
     observer.disconnect();
     for (const key of [...records.keys()]) removeRecord(key);
-    if (previous) void request({ type: "CANCEL_SCAN", runId: previous }).catch(() => {});
     status.state = "stopped";
-    updateStatus("Text marks removed. No new analysis runs while off.");
+    updateStatus(invalidated ? "Deckard was reloaded. Reload this page to reconnect."
+      : "Text marks removed. No new analysis runs while off.");
     sheet?.remove();
     sheet = null;
     if (highlights) view.CSS.highlights.delete(flagClass);
     highlights = undefined;
+    if (previous && !invalidated) void request({ type: "CANCEL_SCAN", runId: previous }).catch(() => {});
     return { ...status };
+  }
+  function invalidate() {
+    if (invalidated) return;
+    invalidated = true;
+    stop();
+    processed.clear();
+    contextProcessed.clear();
+    contexts = [];
+    window.removeEventListener("pagehide", stop);
+    window.removeEventListener("pageshow", pageShow);
+    window.navigation?.removeEventListener("currententrychange", checkNavigation);
+    window.removeEventListener("popstate", checkNavigation);
+    window.removeEventListener("hashchange", checkNavigation);
   }
   async function scan(id) {
     if (stopped || id !== runId || id !== authorizedRun) return;
@@ -375,11 +403,13 @@
     updateStatus();
   }
   async function start(sessionId, settings) {
+    if (invalidated) return { ...status };
     const reauthorizing = !stopped && currentURL === location.href;
     const changedURL = currentURL !== location.href;
     lifecycle++;
     const previous = runId;
     if (previous) void request({ type: "CANCEL_SCAN", runId: previous }).catch(() => {});
+    if (invalidated) return { ...status };
     config = C.normalizeSettings(settings);
     workerSession = sessionId;
     stopped = false;
@@ -428,6 +458,7 @@
     return { ...status };
   }
   async function refresh() {
+    if (invalidated) return { ...status };
     const generation = lifecycle;
     const sequence = ++refreshSequence;
     try {
@@ -453,6 +484,7 @@
     }
   }
   function navigate() {
+    if (invalidated) return;
     stop();
     void refresh();
   }
@@ -513,8 +545,8 @@
     if (usedWords >= C.MAX_PAGE_WORDS || status.state === "error") return;
     scheduleScan();
   });
-  chrome.runtime.onMessage.addListener((message, sender, respond) => {
-    if (sender.id !== chrome.runtime.id || sender.tab || !message || typeof message.type !== "string") return false;
+  runtime.onMessage.addListener((message, sender, respond) => {
+    if (sender.id !== runtime.id || sender.tab || !message || typeof message.type !== "string") return false;
     if (message.type === "PAGE_STATUS") { respond({ ...status }); return false; }
     if (message.type === "FOCUS_FINDING") {
       const record = [...records.values()].find(value => value.id === message.findingId);
@@ -542,9 +574,10 @@
     }
     return false;
   });
+  function pageShow(event) { if (event.persisted) void refresh(); }
+  function checkNavigation() { if (location.href !== currentURL) navigate(); }
   window.addEventListener("pagehide", stop);
-  window.addEventListener("pageshow", event => { if (event.persisted) void refresh(); });
-  const checkNavigation = () => { if (location.href !== currentURL) navigate(); };
+  window.addEventListener("pageshow", pageShow);
   window.navigation?.addEventListener("currententrychange", checkNavigation);
   window.addEventListener("popstate", checkNavigation);
   window.addEventListener("hashchange", checkNavigation);

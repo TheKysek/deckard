@@ -101,7 +101,15 @@ async function harness({ auto = false, count = 1, getConfig, budget = 25000, dua
   const windowEvents = new Map();
   const navigationEvents = new Map();
   const window = { addEventListener: (type, callback) => windowEvents.set(type, callback),
-    navigation: { addEventListener: (type, callback) => navigationEvents.set(type, callback) },
+    removeEventListener: (type, callback) => {
+      if (windowEvents.get(type) === callback) windowEvents.delete(type);
+    },
+    navigation: {
+      addEventListener: (type, callback) => navigationEvents.set(type, callback),
+      removeEventListener: (type, callback) => {
+        if (navigationEvents.get(type) === callback) navigationEvents.delete(type);
+      },
+    },
     getComputedStyle: () => ({
     display: "block", visibility: "visible", opacity: "1",
   }) };
@@ -421,6 +429,108 @@ test("Stop cancels the run, restores nodes, and ignores outstanding results", as
   await h.finish(1);
   assert.equal(h.blocks[1].classes.size, 0);
   assert.equal((await h.send({ type: "PAGE_STATUS" })).state, "stopped");
+});
+
+test("synchronous context invalidation during Stop finishes cleanup without uncaught errors", async () => {
+  const h = await harness({ auto: true, count: 2 });
+  await h.finish(0);
+  let calls = 0;
+  h.context.chrome.runtime.sendMessage = () => {
+    calls++;
+    throw new Error("Extension context invalidated.");
+  };
+  const status = await h.send({ type: "STOP" });
+  assert.equal(status.state, "stopped");
+  assert.match(status.detail, /Reload this page/);
+  assert.ok(h.blocks.every(block => block.classes.size === 0));
+  assert.deepEqual(h.root.children, h.blocks);
+  assert.equal(h.observer.active, false);
+  assert.equal(h.timers.size, 0);
+  assert.equal(h.windowEvents.size, 0);
+  assert.equal(h.navigationEvents.size, 0);
+  await h.finish(1);
+  await h.send({ type: "START" });
+  assert.equal(calls, 1, "a retired script never retries the invalid runtime");
+  assert.equal(h.analyses.length, 2);
+  assert.ok(h.blocks.every(block => block.classes.size === 0));
+});
+
+test("context invalidation during SPA navigation retires all navigation handlers", async () => {
+  const h = await harness({ auto: true });
+  await h.finish();
+  const navigate = h.navigationEvents.get("currententrychange");
+  const pageShow = h.windowEvents.get("pageshow");
+  let calls = 0;
+  h.context.chrome.runtime.sendMessage = () => {
+    calls++;
+    throw new Error("Extension context invalidated.");
+  };
+  h.context.location.href = "https://example.com/next";
+  assert.doesNotThrow(navigate);
+  await h.settle();
+  navigate();
+  pageShow({ persisted: true });
+  await h.settle();
+  assert.equal(calls, 1);
+  assert.equal(h.blocks[0].classes.size, 0);
+  assert.equal(h.observer.active, false);
+  assert.equal(h.windowEvents.size, 0);
+  assert.equal(h.navigationEvents.size, 0);
+});
+
+test("asynchronous context invalidation in progress reporting removes marks and discards in-flight results", async () => {
+  const h = await harness({ auto: true, count: 2 });
+  const original = h.context.chrome.runtime.sendMessage;
+  h.context.chrome.runtime.sendMessage = message => message.type === "PAGE_PROGRESS"
+    ? Promise.reject(new Error("Extension context invalidated.")) : original(message);
+  await h.finish(0);
+  assert.equal(h.blocks[0].classes.size, 0);
+  assert.equal(h.observer.active, false);
+  assert.equal((await h.send({ type: "PAGE_STATUS" })).state, "stopped");
+  await h.finish(1);
+  assert.equal(h.blocks[1].classes.size, 0);
+  assert.equal(h.requests.filter(message => message.type === "CANCEL_SCAN").length, 0);
+});
+
+test("missing runtime identity rejects late results without another message or page annotation", async () => {
+  const h = await harness({ auto: true });
+  const count = h.requests.length;
+  delete h.context.chrome.runtime.id;
+  await h.finish();
+  assert.equal(h.blocks[0].classes.size, 0);
+  assert.equal(h.requests.length, count);
+  assert.equal(h.observer.active, false);
+  assert.equal(h.windowEvents.size, 0);
+});
+
+test("missing runtime identity before a request cleans up without invoking the invalid API", async () => {
+  const h = await harness({ auto: true });
+  await h.finish();
+  const pageHide = h.windowEvents.get("pagehide");
+  const count = h.requests.length;
+  delete h.context.chrome.runtime.id;
+  assert.doesNotThrow(pageHide);
+  await h.settle();
+  assert.equal(h.requests.length, count);
+  assert.equal(h.blocks[0].classes.size, 0);
+  assert.equal(h.observer.active, false);
+  assert.equal(h.windowEvents.size, 0);
+});
+
+test("ordinary synchronous messaging errors remain visible and allow a later retry", async () => {
+  const h = await harness({ auto: true });
+  await h.finish();
+  const original = h.context.chrome.runtime.sendMessage;
+  h.context.chrome.runtime.sendMessage = () => { throw new Error("Unexpected messaging failure."); };
+  await h.send({ type: "SETTINGS_CHANGED" });
+  const status = await h.send({ type: "PAGE_STATUS" });
+  assert.equal(status.state, "error");
+  assert.match(status.detail, /Unexpected messaging failure/);
+  assert.equal(h.windowEvents.size, 4);
+  h.context.chrome.runtime.sendMessage = original;
+  await h.send({ type: "START" });
+  await h.settle();
+  assert.equal((await h.send({ type: "PAGE_STATUS" })).state, "done");
 });
 
 test("mutations stay capped but a new SPA page replenishes the word budget", async () => {

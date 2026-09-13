@@ -6,11 +6,11 @@ Named after the original AI hunter in _Blade Runner_, Deckard is a Chrome extens
 
 ## Getting started
 
-Install [Deckard v0.6.1](https://github.com/sgoedecke/deckard/releases/tag/v0.6.1)
+Install [Deckard v0.6.2](https://github.com/sgoedecke/deckard/releases/tag/v0.6.2)
 from your terminal:
 
 ```sh
-curl --proto '=https' --tlsv1.2 -fsSL https://github.com/sgoedecke/deckard/releases/download/v0.6.1/install.sh | bash
+curl --proto '=https' --tlsv1.2 -fsSL https://github.com/sgoedecke/deckard/releases/download/v0.6.2/install.sh | bash
 ```
 
 In Chrome:
@@ -64,7 +64,7 @@ scripts/package-release.sh --model-dir /path/to/canonical/mlx-q4
 
 The build reads the external dependency cache without modifying it. Packaging
 also accepts `--native-dist native-cli/build/dist` and
-`--output-dir dist/v0.6.1`. These are maintainer steps, not evidence that a
+`--output-dir dist/v0.6.2`. These are maintainer steps, not evidence that a
 release has been published. Release archives bundle prepared model assets;
 source installs must pass `--model-dir` explicitly. The installer does not
 download or convert upstream FP32 weights automatically.

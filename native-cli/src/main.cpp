@@ -577,7 +577,7 @@ void verify(const Options& options) {
 }
 void help() {
     std::cout <<
-        "Deckard 0.6.1 - native Gradient/Core ML for Apple Silicon macOS15+\n\n"
+        "Deckard 0.6.2 - native Gradient/Core ML for Apple Silicon macOS15+\n\n"
         "deckard install [--extension-id ID] [--replace] [--model-dir DIR]\n"
         "                [--home DIR] [--manifest-dir DIR] [--no-register]\n"
         "                [--extension-dir DIR] [--shell zsh|bash|none] [--no-extension]\n"
