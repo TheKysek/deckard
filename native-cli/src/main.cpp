@@ -100,8 +100,11 @@ struct Removal {
     std::set<fs::path> directories;
 };
 Removal validate_release(const fs::path& release);
+bool coreml_release_version(const Json& version) {
+    return version == app_version || version == "0.6.0" || version == "0.6.1" || version == "0.6.2";
+}
 bool owned_release_version(const Json& version) {
-    return version == app_version || version == "0.5.0" || version == "0.4.0" || version == "0.4.1";
+    return coreml_release_version(version) || version == "0.5.0" || version == "0.4.0" || version == "0.4.1";
 }
 fs::path installation_prefix() {
     auto distribution = executable_path().parent_path().parent_path();
@@ -317,7 +320,7 @@ Removal validate_release(const fs::path& release) {
     auto config = read_json(metadata);
     if (!config.is_object())
         uninstall_conflict("Release ownership metadata must be an object.");
-    const bool coreml = config.value("version", Json()) == app_version;
+    const bool coreml = coreml_release_version(config.value("version", Json()));
     const bool two_scale = coreml || config.value("version", Json()) == "0.5.0";
     if (!config.is_object() || config.value("format", Json()) != 1 ||
         config.value("product", Json()) != "Deckard" || !owned_release_version(config.value("version", Json())) ||
@@ -577,7 +580,7 @@ void verify(const Options& options) {
 }
 void help() {
     std::cout <<
-        "Deckard 0.6.2 - native Gradient/Core ML for Apple Silicon macOS15+\n\n"
+        "Deckard 0.6.3 - native Gradient/Core ML for Apple Silicon macOS15+\n\n"
         "deckard install [--extension-id ID] [--replace] [--model-dir DIR]\n"
         "                [--home DIR] [--manifest-dir DIR] [--no-register]\n"
         "                [--extension-dir DIR] [--shell zsh|bash|none] [--no-extension]\n"

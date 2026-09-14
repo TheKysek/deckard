@@ -6,6 +6,7 @@ import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { gzipSync } from 'node:zlib';
+import { modelFiles, renderInstaller } from '../scripts/release-assets.mjs';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const scratch = path.join(root, 'tests', `.bootstrap-${process.pid}`);
@@ -13,6 +14,9 @@ const commands = path.join(scratch, 'mock commands');
 let template;
 let archive;
 let digest;
+let appArchive;
+let appDigest;
+let pins;
 let sequence = 0;
 const hash = data => createHash('sha256').update(data).digest('hex');
 async function executable(name, content) {
@@ -21,6 +25,8 @@ async function executable(name, content) {
 before(async () => {
   await fs.mkdir(commands, { recursive: true });
   template = await fs.readFile(path.join(root, 'install.sh'), 'utf8');
+  pins = JSON.parse(await fs.readFile(path.join(root, 'native-cli/model-assets.json'), 'utf8'));
+  pins.files = Object.fromEntries(modelFiles.map(name => [name, hash('fixture')]));
   await executable('uname', 'case "$1" in -s) echo "${MOCK_OS:-Darwin}";; -m) echo "${MOCK_ARCH:-arm64}";; esac');
   await executable('sw_vers', 'echo "${MOCK_VERSION:-15.0}"');
   await executable('tar', `
@@ -34,10 +40,19 @@ exec /usr/bin/tar "$@"
   await executable('curl', `
 printf '%s\\n' "$@" > "$CURL_LOG"
 output=
+url=
 while [ "$#" -gt 0 ]; do
-  if [ "$1" = --output ]; then output=$2; shift 2; else shift; fi
+  case "$1" in
+    --output) output=$2; shift 2 ;;
+    https:*) url=$1; shift ;;
+    *) shift ;;
+  esac
 done
-cp "$MOCK_ARCHIVE" "$output"
+if [ "\${MOCK_CURL_FAILURE:-0}" != 0 ]; then exit "$MOCK_CURL_FAILURE"; fi
+case "$url" in
+  *-app.tar.gz) cp "$MOCK_APP_ARCHIVE" "$output" ;;
+  *) cp "$MOCK_ARCHIVE" "$output" ;;
+esac
 `);
   const bundle = path.join(scratch, 'bundle');
   for (const dir of ['bin', 'share/licenses', 'extension', 'models/model.mlpackage/Data/com.apple.CoreML/weights']) await fs.mkdir(path.join(bundle, dir), { recursive: true });
@@ -50,13 +65,20 @@ cp "$MOCK_ARCHIVE" "$output"
   const result = spawnSync('/usr/bin/tar', ['-czf', archive, '-C', bundle, 'bin', 'share', 'extension', 'models']);
   assert.equal(result.status, 0, result.stderr?.toString());
   digest = hash(await fs.readFile(archive));
+  appArchive = path.join(scratch, 'app.tar.gz');
+  const appResult = spawnSync('/usr/bin/tar', ['-czf', appArchive, '-C', bundle, 'bin', 'share', 'extension']);
+  assert.equal(appResult.status, 0, appResult.stderr?.toString());
+  appDigest = hash(await fs.readFile(appArchive));
 });
 after(async () => fs.rm(scratch, { recursive: true, force: true }));
 
 async function invoke(args = ['--yes', '--shell', 'none'], options = {}) {
   const directory = path.join(scratch, `case ${++sequence}`);
   await fs.mkdir(directory);
-  const script = options.script ?? template.replace('@ARCHIVE_SHA256@', options.digest ?? digest);
+  const script = options.script ?? renderInstaller(template, {
+    archiveSha256: options.digest ?? digest, appSha256: options.appDigest ?? appDigest,
+    pins: options.pins ?? pins,
+  });
   const scriptFile = path.join(directory, 'installer.sh');
   await fs.writeFile(scriptFile, script);
   const env = {
@@ -64,12 +86,22 @@ async function invoke(args = ['--yes', '--shell', 'none'], options = {}) {
     HOME: path.join(directory, 'isolated home'),
     SHELL: '/bin/zsh',
     MOCK_ARCHIVE: options.archive ?? archive,
+    MOCK_APP_ARCHIVE: appArchive,
     NATIVE_LOG: path.join(directory, 'native.log'),
     CURL_LOG: path.join(directory, 'curl.log'),
     BOOTSTRAP_FILE: scriptFile,
     TTY_ANSWER: options.answer ?? 'y',
     ...options.env,
   };
+  let cachedSource;
+  if (options.cachedModel) {
+    const index = args.lastIndexOf('--home');
+    const prefix = index >= 0 ? path.resolve(directory, args[index + 1]) : path.join(env.HOME, 'Library/Application Support/Deckard');
+    cachedSource = path.join(prefix, 'releases/0.6.0-fixture/models');
+    await fs.cp(path.join(scratch, 'bundle/models'), cachedSource, { recursive: true });
+    await fs.symlink('releases/0.6.0-fixture', path.join(prefix, 'current'));
+    if (options.alterCache) await options.alterCache({ prefix, source: cachedSource });
+  }
   const ttyScript = path.join(directory, 'tty.exp');
   if (options.tty) await fs.writeFile(ttyScript, `
 set timeout 5
@@ -92,7 +124,7 @@ exit [lindex $result 3]
     env, cwd: directory, encoding: 'utf8', timeout: 10000,
   });
   const read = async name => fs.readFile(path.join(directory, name), 'utf8').catch(() => null);
-  return { ...result, native: await read('native.log'), curl: await read('curl.log'), files: await fs.readdir(directory) };
+  return { ...result, native: await read('native.log'), curl: await read('curl.log'), files: await fs.readdir(directory), cachedSource };
 }
 
 test('curl-piped installer forwards spaces and options to native, which owns setup', async () => {
@@ -100,7 +132,7 @@ test('curl-piped installer forwards spaces and options to native, which owns set
   assert.equal(result.status, 0, result.stderr);
   assert.match(result.native, /^install\n--home\nan isolated home\n--manifest-dir\nmanifest with spaces\n--extension-id\nabcdefghijklmnopabcdefghijklmnop\n--model-dir\n.*\/bundle\/models\n--extension-dir\n.*\/bundle\/extension\n--shell\nbash\n$/);
   assert.match(result.curl, /--proto\n=https\n--proto-redir\n=https\n/);
-  assert.match(result.curl, /https:\/\/github\.com\/sgoedecke\/deckard\/releases\/download\/v0\.6\.2\/deckard-v0\.6\.2-macos-arm64\.tar\.gz/);
+  assert.match(result.curl, /https:\/\/github\.com\/sgoedecke\/deckard\/releases\/download\/v0\.6\.3\/deckard-v0\.6\.3-macos-arm64\.tar\.gz/);
   assert.ok(!result.files.some(file => file.startsWith('.deckard-bootstrap.')));
 });
 
@@ -108,6 +140,75 @@ test('supported SHELL basename is used with --yes', async () => {
   const result = await invoke(['--yes'], { env: { SHELL: '/custom/path/bash' } });
   assert.equal(result.status, 0, result.stderr);
   assert.match(result.native, /--shell\nbash\n$/);
+});
+
+test('unchanged model uses only the app archive and passes its resolved local directory to native', async () => {
+  const result = await invoke(undefined, { cachedModel: true });
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /Installed model checksums match/);
+  assert.match(result.curl, /deckard-v0\.6\.3-macos-arm64-app\.tar\.gz/);
+  assert.ok(result.native.includes(`--model-dir\n${result.cachedSource}\n`));
+  assert.doesNotMatch(result.native, /\/bundle\/models/);
+  for (const name of modelFiles) {
+    assert.equal(await fs.readFile(path.join(result.cachedSource, name), 'utf8'), 'fixture');
+  }
+  assert.ok(!result.files.some(file => file.startsWith('.deckard-bootstrap.')));
+});
+
+test('model reuse honors a relative custom --home with spaces', async () => {
+  const result = await invoke(['--yes', '--shell', 'none', '--home', 'custom installation'], { cachedModel: true });
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.curl, /-app\.tar\.gz/);
+  assert.match(result.native, /--home\ncustom installation\n--model-dir\ncustom installation\/releases\/0.6.0-fixture\/models\n/);
+});
+
+test('each missing or changed model file forces the full archive instead of trusting metadata', async () => {
+  for (const name of modelFiles) for (const missing of [false, true]) {
+    const result = await invoke(undefined, { cachedModel: true, alterCache: async ({ source }) => {
+      if (missing) await fs.unlink(path.join(source, name));
+      else await fs.writeFile(path.join(source, name), 'changed model data');
+    } });
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, /No matching installed model/);
+    assert.match(result.curl, /deckard-v0\.6\.3-macos-arm64\.tar\.gz/);
+    assert.match(result.native, /--model-dir\n.*\/bundle\/models\n/);
+  }
+});
+
+test('a new target model checksum selects a full download even when the cached model is intact', async () => {
+  const next = structuredClone(pins);
+  next.files['model.mlpackage/Data/com.apple.CoreML/weights/weight.bin'] = '0'.repeat(64);
+  const result = await invoke(undefined, { cachedModel: true, pins: next });
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.curl, /deckard-v0\.6\.3-macos-arm64\.tar\.gz/);
+});
+
+test('redirected release pointers and model components are not reused', async () => {
+  for (const target of ['pointer', 'dot-pointer', 'model.mlpackage/Data', 'tokenizer.json']) {
+    const result = await invoke(undefined, { cachedModel: true, alterCache: async ({ prefix, source }) => {
+      if (target === 'pointer' || target === 'dot-pointer') {
+        await fs.unlink(path.join(prefix, 'current'));
+        if (target === 'dot-pointer') await fs.cp(source, path.join(prefix, 'models'), { recursive: true });
+        await fs.symlink(target === 'pointer' ? path.dirname(source) : 'releases/..', path.join(prefix, 'current'));
+      } else {
+        const file = path.join(source, target);
+        await fs.rename(file, `${file}.saved`);
+        await fs.symlink(`${file}.saved`, file);
+      }
+    } });
+    assert.equal(result.status, 0, result.stderr);
+    assert.doesNotMatch(result.curl, /-app\.tar\.gz/);
+  }
+});
+
+test('invalid app archive checksums and failed app downloads do not install or silently fetch the model', async () => {
+  for (const options of [{ appDigest: '0'.repeat(64) }, { env: { MOCK_CURL_FAILURE: '22' } }]) {
+    const result = await invoke(undefined, { cachedModel: true, ...options });
+    assert.notEqual(result.status, 0);
+    assert.equal(result.native, null);
+    assert.match(result.curl, /-app\.tar\.gz/);
+    assert.ok(!result.files.some(file => file.startsWith('.deckard-bootstrap.')));
+  }
 });
 
 test('--yes --no-open installs without launching or probing Chrome', async () => {
@@ -149,7 +250,7 @@ test('no controlling terminal fails clearly without --yes', async () => {
 test('pipe prompts read from controlling tty, never script stdin', { skip: process.platform !== 'darwin' }, async () => {
   const result = await invoke(['--shell', 'none'], { tty: true });
   assert.equal(result.error, undefined);
-  assert.match(result.stdout, /Install Deckard v0\.6\.2/);
+  assert.match(result.stdout, /Install Deckard v0\.6\.3/);
   assert.match(result.native ?? '', /^install\n/);
 });
 

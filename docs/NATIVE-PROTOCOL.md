@@ -47,6 +47,22 @@ artifact, macOS build, and hardware. This is separate from the bounded
 in-memory score cache below and contains no page text. Installation and ping
 do not require inference. The host keeps one model loaded until it exits.
 
+### Installer downloads
+
+Release packaging produces a full `deckard-vVERSION-macos-arm64.tar.gz` and
+an app-only `deckard-vVERSION-macos-arm64-app.tar.gz`, plus `install.sh` and
+`SHA256SUMS`. Publish all four assets. The app archive contains the same
+executable, extension, and licenses, but no model payload.
+
+The installer checks each installed model file against checksums embedded
+from the target release's pins, respecting a custom `--home` prefix. Matching
+models select the app-only archive; missing or mismatched models select the
+full archive. The selected archive's own pinned checksum is verified before
+extraction. Reused model files are copied locally into the new release and
+verified again by the native installer before activation, so changes during
+download fail safely. A failed app-only download never silently falls back to
+downloading the full model.
+
 ## Extension page authorization
 
 Deckard declares required HTTP/HTTPS host permissions. A missing saved

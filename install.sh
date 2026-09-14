@@ -1,6 +1,7 @@
 #!/bin/bash
-# Release packaging replaces this template's digest. Keep all execution in the
-# function: an interrupted curl pipe must not execute a partially read installer.
+# Release packaging pins both archive digests and the model checksums.
+# Keep all execution in the function: an interrupted curl pipe must not execute
+# a partially read installer.
 deckard_bootstrap() (
   set -eu
   export LC_ALL=C
@@ -13,6 +14,7 @@ deckard_bootstrap() (
   }
   yes=false
   shell_choice=
+  install_home="${HOME-}/Library/Application Support/Deckard"
   native_options=(install)
   while [ "$#" -gt 0 ]; do
     case "$1" in
@@ -22,7 +24,10 @@ deckard_bootstrap() (
         [ "$#" -ge 2 ] && [ -n "$2" ] || fail "$1 requires a value."
         case "$2" in --*) fail "$1 requires a value." ;; esac
         if [ "$1" = --shell ]; then shell_choice=$2
-        else native_options+=("$1" "$2"); fi
+        else
+          if [ "$1" = --home ]; then install_home=$2; fi
+          native_options+=("$1" "$2")
+        fi
         shift 2 ;;
       --help|-h) usage; exit 0 ;;
       *) usage >&2; fail "Unknown option: $1" ;;
@@ -50,29 +55,72 @@ deckard_bootstrap() (
     if ! { exec 3<>/dev/tty; } 2>/dev/null; then
       fail 'No controlling terminal. Re-run with --yes and a supported --shell (or SHELL).'
     fi
-    printf 'Install Deckard v0.6.2 (including Core ML model weights) and configure shell %s? [y/N] ' "$shell_choice" >&3
+    printf 'Install Deckard v0.6.3 (including Core ML model weights) and configure shell %s? [y/N] ' "$shell_choice" >&3
     answer=
     IFS= read -r answer <&3 || fail 'Confirmation could not be read.'
     exec 3>&-
     case "$answer" in y|Y|yes|YES) ;; *) fail 'Installation cancelled.' ;; esac
   fi
   expected='@ARCHIVE_SHA256@'
+  app_expected='@APP_ARCHIVE_SHA256@'
+  model_sums='@MODEL_SHA256SUMS@'
   case "$expected" in ''|*[!0-9a-f]*) fail 'This source template is not a release installer: missing pinned archive SHA-256.' ;; esac
   [ "${#expected}" -eq 64 ] || fail 'Invalid pinned archive SHA-256.'
-  for tool in curl shasum tar awk sort uniq wc; do
+  case "$app_expected" in ''|*[!0-9a-f]*) fail 'Missing pinned app archive SHA-256.' ;; esac
+  [ "${#app_expected}" -eq 64 ] || fail 'Invalid pinned app archive SHA-256.'
+  for tool in curl shasum tar awk sort uniq wc readlink; do
     command -v "$tool" >/dev/null || fail "Required command not found: $tool"
   done
+  printf '%s\n' "$model_sums" | awk '
+    NF != 2 || length($1) != 64 || $1 ~ /[^0-9a-f]/ { exit 1 }
+    $2 !~ /^[A-Za-z0-9_.\/-]+$/ || $2 ~ /^\// || $2 ~ /(^|\/)\.\.?($|\/)/ || $2 ~ /\/\// { exit 1 }
+    END { if (NR != 4) exit 1 }
+  ' || fail 'Invalid pinned model checksums.'
+  cached_model() (
+    [ -L "$install_home/current" ] || exit 1
+    pointer=$(readlink "$install_home/current") || exit 1
+    case "$pointer" in releases/*) ;; *) exit 1 ;; esac
+    release_name=${pointer#releases/}
+    case "$release_name" in ''|.|..|*[!A-Za-z0-9.-]*) exit 1 ;; esac
+    source="$install_home/$pointer/models"
+    for directory in "$install_home" "$install_home/releases" "$install_home/$pointer" "$source"; do
+      [ -d "$directory" ] && [ ! -L "$directory" ] || exit 1
+    done
+    while read -r checksum relative; do
+      directory=$source
+      remaining=$relative
+      while [[ "$remaining" == */* ]]; do
+        directory="$directory/${remaining%%/*}"
+        remaining=${remaining#*/}
+        [ -d "$directory" ] && [ ! -L "$directory" ] || exit 1
+      done
+      file="$directory/$remaining"
+      [ -f "$file" ] && [ ! -L "$file" ] || exit 1
+      actual=$(shasum -a 256 "$file") || exit 1
+      [ "${actual%% *}" = "$checksum" ] || exit 1
+    done <<< "$model_sums"
+    printf '%s\n' "$source"
+  )
+  archive_name=deckard-v0.6.3-macos-arm64.tar.gz
+  if model_source=$(cached_model); then
+    archive_name=deckard-v0.6.3-macos-arm64-app.tar.gz
+    expected=$app_expected
+    printf 'Installed model checksums match. Downloading the app-only update; reusing local model files.\n'
+  else
+    model_source=
+    printf 'No matching installed model found. Downloading the full release bundle.\n'
+  fi
   work="$PWD/.deckard-bootstrap.$$.$RANDOM"
   (umask 077; mkdir "$work") || fail 'Cannot create private staging directory in the current directory.'
   trap 'rm -rf -- "$work"' EXIT
   trap 'exit 130' INT
   trap 'exit 143' TERM HUP
-  archive="$work/deckard-v0.6.2-macos-arm64.tar.gz"
-  url='https://github.com/sgoedecke/deckard/releases/download/v0.6.2/deckard-v0.6.2-macos-arm64.tar.gz'
-  printf 'Downloading Deckard v0.6.2…\n'
+  archive="$work/$archive_name"
+  url="https://github.com/sgoedecke/deckard/releases/download/v0.6.3/$archive_name"
+  printf 'Downloading Deckard v0.6.3…\n'
   curl --fail --location --proto '=https' --proto-redir '=https' \
     --connect-timeout 30 --max-time 1800 --output "$archive" "$url" ||
-    fail 'Download failed. The pinned v0.6.2 release must be published before this installer can be used.'
+    fail 'Download failed. The pinned v0.6.3 release must be published before this installer can be used.'
   archive_bytes=$(wc -c < "$archive")
   [ "$archive_bytes" -gt 0 ] && [ "$archive_bytes" -lt 2147483648 ] ||
     fail 'Release archive must be under 2147483648 bytes (2 GiB).'
@@ -109,14 +157,15 @@ deckard_bootstrap() (
   tar -xzf "$archive" -C "$work/bundle" --no-same-owner --no-same-permissions \
     --no-xattrs --no-acls --no-fflags || fail 'Archive extraction failed.'
   bundle="$work/bundle"
+  if [ -z "$model_source" ]; then model_source="$bundle/models"; fi
   [ -x "$bundle/bin/deckard" ] &&
     [ -d "$bundle/share/licenses" ] && [ -f "$bundle/extension/manifest.json" ] &&
-    [ -f "$bundle/models/model.mlpackage/Manifest.json" ] &&
-    [ -f "$bundle/models/model.mlpackage/Data/com.apple.CoreML/model.mlmodel" ] &&
-    [ -f "$bundle/models/model.mlpackage/Data/com.apple.CoreML/weights/weight.bin" ] &&
-    [ -f "$bundle/models/tokenizer.json" ] ||
+    [ -f "$model_source/model.mlpackage/Manifest.json" ] &&
+    [ -f "$model_source/model.mlpackage/Data/com.apple.CoreML/model.mlmodel" ] &&
+    [ -f "$model_source/model.mlpackage/Data/com.apple.CoreML/weights/weight.bin" ] &&
+    [ -f "$model_source/tokenizer.json" ] ||
     fail 'Release archive is missing required files.'
-  "$bundle/bin/deckard" "${native_options[@]}" --model-dir "$bundle/models" \
+  "$bundle/bin/deckard" "${native_options[@]}" --model-dir "$model_source" \
     --extension-dir "$bundle/extension" --shell "$shell_choice"
 )
 deckard_bootstrap "$@"

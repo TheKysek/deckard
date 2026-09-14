@@ -4,7 +4,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createHash } from 'node:crypto';
-import { archiveSizeLimit, checkArchiveSize, copyAssets, modelFiles, validatePins, verifyAssets } from '../scripts/release-assets.mjs';
+import { archiveSizeLimit, checkArchiveSize, copyAssets, modelFiles, validatePins, verifyAssets, renderInstaller } from '../scripts/release-assets.mjs';
 
 const root = fileURLToPath(new URL('../', import.meta.url));
 const canonical = JSON.parse(await fs.readFile(path.join(root, 'native-cli/model-assets.json'), 'utf8'));
@@ -105,14 +105,32 @@ test('archive is strictly below the GitHub 2 GiB asset limit', () => {
   }
 });
 
+test('installer embeds independent archive hashes and canonical model checksums', async () => {
+  const template = await fs.readFile(path.join(root, 'install.sh'), 'utf8');
+  const values = { archiveSha256: 'a'.repeat(64), appSha256: 'b'.repeat(64), pins: canonical };
+  const installer = renderInstaller(template, values);
+  assert.ok(installer.includes(`expected='${values.archiveSha256}'`));
+  assert.ok(installer.includes(`app_expected='${values.appSha256}'`));
+  for (const [name, hash] of Object.entries(canonical.files)) assert.ok(installer.includes(`${hash}  ${name}`));
+  assert.doesNotMatch(installer, /@[A-Z_]+@/);
+  for (const placeholder of ['@ARCHIVE_SHA256@', '@APP_ARCHIVE_SHA256@', '@MODEL_SHA256SUMS@']) {
+    assert.throws(() => renderInstaller(template.replace(placeholder, ''), values), /exactly one/);
+    assert.throws(() => renderInstaller(template + placeholder, values), /exactly one/);
+  }
+  assert.throws(() => renderInstaller(template, { ...values, appSha256: 'invalid' }), /Invalid archive/);
+  assert.throws(() => renderInstaller(template, { ...values, pins: {} }), /Invalid Core ML/);
+});
+
 test('release versions and production packaging remain aligned', async () => {
   for (const name of ['package.json', 'extension/manifest.json']) {
-    assert.equal(JSON.parse(await fs.readFile(path.join(root, name), 'utf8')).version, '0.6.2');
+    assert.equal(JSON.parse(await fs.readFile(path.join(root, name), 'utf8')).version, '0.6.3');
   }
   const script = await fs.readFile(path.join(root, 'scripts/package-release.mjs'), 'utf8');
-  assert.match(script, /const version = '0\.6\.2'/);
+  assert.match(script, /const version = '0\.6\.3'/);
   assert.match(script, /native-cli\/model-assets\.json/);
   assert.match(script, /share\/licenses\/model-assets\.json/);
   assert.match(script, /checkArchiveSize\(\(await fs.stat\(archive\)\).size\)/);
+  assert.match(script, /entries\.filter\(name => !name\.startsWith\('models\/'\)\)/);
+  assert.match(script, /renderInstaller\(template/);
   assert.doesNotMatch(script, /libmlx\.dylib|mlx\.metallib|packed\.safetensors/);
 });

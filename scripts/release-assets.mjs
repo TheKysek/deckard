@@ -23,6 +23,23 @@ export function validatePins(pins) {
   return pins.files;
 }
 
+export function renderInstaller(template, { archiveSha256, appSha256, pins }) {
+  const files = validatePins(pins);
+  for (const digest of [archiveSha256, appSha256]) {
+    if (typeof digest !== 'string' || !/^[a-f0-9]{64}$/.test(digest)) throw new Error('Invalid archive SHA-256.');
+  }
+  const values = {
+    '@ARCHIVE_SHA256@': archiveSha256,
+    '@APP_ARCHIVE_SHA256@': appSha256,
+    '@MODEL_SHA256SUMS@': Object.entries(files).map(([name, digest]) => `${digest}  ${name}`).join('\n'),
+  };
+  for (const [placeholder, value] of Object.entries(values)) {
+    if (template.split(placeholder).length !== 2) throw new Error(`Installer must contain exactly one ${placeholder} placeholder.`);
+    template = template.replace(placeholder, value);
+  }
+  return template;
+}
+
 export async function sha256(file) {
   const hash = createHash('sha256');
   for await (const chunk of createReadStream(file)) hash.update(chunk);

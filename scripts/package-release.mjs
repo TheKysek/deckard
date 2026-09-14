@@ -2,11 +2,12 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { execFileSync } from 'node:child_process';
-import { validatePins, verifyAssets, copyAssets, sha256, checkArchiveSize } from './release-assets.mjs';
+import { validatePins, verifyAssets, copyAssets, sha256, checkArchiveSize, renderInstaller } from './release-assets.mjs';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const version = '0.6.2';
+const version = '0.6.3';
 const archiveName = `deckard-v${version}-macos-arm64.tar.gz`;
+const appArchiveName = `deckard-v${version}-macos-arm64-app.tar.gz`;
 const options = { '--native-dist': path.join(root, 'native-cli/build/dist'), '--output-dir': path.join(root, `dist/v${version}`) };
 for (let i = 2; i < process.argv.length; i += 2) {
   const key = process.argv[i];
@@ -83,23 +84,32 @@ try {
     await fs.chmod(file, entry.endsWith('/') || entry === 'bin/deckard' ? 0o755 : 0o644);
     await fs.utimes(file, epoch, epoch);
   }
-  const fileList = path.join(staging, 'entries');
-  await fs.writeFile(fileList, entries.join('\n') + '\n');
-  const tarFile = path.join(staging, archiveName.slice(0, -3));
-  run('/usr/bin/tar', ['--format', 'ustar', '--no-recursion', '--uid', '0', '--gid', '0', '--uname', 'root', '--gname', 'wheel',
-    '--no-xattrs', '--no-acls', '--no-fflags', '-cf', tarFile, '-C', bundle, '-T', fileList]);
-  run('/usr/bin/gzip', ['-n', '-9', tarFile]);
-  const archive = path.join(staging, archiveName);
-  const archiveBytes = checkArchiveSize((await fs.stat(archive)).size);
-  const digest = await sha256(archive);
+  async function pack(name, included) {
+    const fileList = path.join(staging, `${name}.entries`);
+    await fs.writeFile(fileList, included.join('\n') + '\n');
+    const tarFile = path.join(staging, name.slice(0, -3));
+    run('/usr/bin/tar', ['--format', 'ustar', '--no-recursion', '--uid', '0', '--gid', '0', '--uname', 'root', '--gname', 'wheel',
+      '--no-xattrs', '--no-acls', '--no-fflags', '-cf', tarFile, '-C', bundle, '-T', fileList]);
+    run('/usr/bin/gzip', ['-n', '-9', tarFile]);
+    const archive = path.join(staging, name);
+    const bytes = checkArchiveSize((await fs.stat(archive)).size);
+    return { name, bytes, digest: await sha256(archive) };
+  }
+  const full = await pack(archiveName, entries);
+  const app = await pack(appArchiveName, entries.filter(name => !name.startsWith('models/')));
   const template = await fs.readFile(path.join(root, 'install.sh'), 'utf8');
-  if (template.split('@ARCHIVE_SHA256@').length !== 2) throw new Error('Installer template must contain exactly one digest placeholder.');
-  const installer = template.replace('@ARCHIVE_SHA256@', digest);
+  const installer = renderInstaller(template, {
+    archiveSha256: full.digest, appSha256: app.digest, pins: JSON.parse(pinsContent),
+  });
   await fs.writeFile(path.join(staging, 'install.sh'), installer, { mode: 0o755 });
   const installerDigest = await sha256(path.join(staging, 'install.sh'));
-  await fs.writeFile(path.join(staging, 'SHA256SUMS'), `${digest}  ${archiveName}\n${installerDigest}  install.sh\n`);
-  for (const name of [archiveName, 'install.sh', 'SHA256SUMS']) await fs.rename(path.join(staging, name), path.join(out, name));
-  console.log(`Packaged ${path.join(out, archiveName)}\nArchive bytes: ${archiveBytes} (under 2147483648)\nSHA-256: ${digest}\nAd-hoc signatures verified. Not notarized. No release was published.`);
+  await fs.writeFile(path.join(staging, 'SHA256SUMS'),
+    `${full.digest}  ${archiveName}\n${app.digest}  ${appArchiveName}\n${installerDigest}  install.sh\n`);
+  for (const name of [archiveName, appArchiveName, 'install.sh', 'SHA256SUMS']) await fs.rename(path.join(staging, name), path.join(out, name));
+  for (const archive of [full, app]) {
+    console.log(`Packaged ${path.join(out, archive.name)}\nArchive bytes: ${archive.bytes} (under 2147483648)\nSHA-256: ${archive.digest}`);
+  }
+  console.log('Ad-hoc signatures verified. Not notarized. No release was published.');
 } finally {
   await fs.rm(staging, { recursive: true, force: true });
 }

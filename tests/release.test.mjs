@@ -4,7 +4,9 @@ import fs from "node:fs";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import { createHash } from "node:crypto";
 import { archiveSizeLimit, modelFiles } from "../scripts/release-assets.mjs";
+import { canonicalJson } from "../native-cli/tests/model-fixture.mjs";
 
 const root = fileURLToPath(new URL("../", import.meta.url));
 const release = process.env.DECKARD_RELEASE_DIR;
@@ -21,9 +23,12 @@ test("real release archive installs, upgrades, uninstalls and reinstalls through
     const profile = path.join(user, ".zshrc");
     const original = "# unrelated settings\nexport PERSONAL_TEST_SETTING=preserved";
     fs.writeFileSync(profile, original);
-    const archiveName = "deckard-v0.6.2-macos-arm64.tar.gz";
+    const archiveName = "deckard-v0.6.3-macos-arm64.tar.gz";
+    const appArchiveName = "deckard-v0.6.3-macos-arm64-app.tar.gz";
     const archive = path.resolve(release, archiveName);
+    const appArchive = path.resolve(release, appArchiveName);
     assert.ok(fs.statSync(archive).size < archiveSizeLimit);
+    assert.ok(fs.statSync(appArchive).size < fs.statSync(archive).size / 10);
     const listing = spawnSync("/usr/bin/tar", ["-tzf", archive], {
       encoding: "utf8", timeout: 120000, maxBuffer: 4 * 1024 * 1024,
     });
@@ -32,6 +37,12 @@ test("real release archive installs, upgrades, uninstalls and reinstalls through
     for (const name of modelFiles) assert.ok(entries.has(`models/${name}`), `Missing packaged asset: ${name}`);
     assert.ok(entries.has("share/licenses/model-assets.json"));
     assert.doesNotMatch(listing.stdout, /packed\.safetensors|libmlx\.dylib|mlx\.metallib|MLX-LICENSE/);
+    const appListing = spawnSync("/usr/bin/tar", ["-tzf", appArchive], { encoding: "utf8", timeout: 120000 });
+    assert.equal(appListing.status, 0, appListing.stderr);
+    assert.doesNotMatch(appListing.stdout, /^models(?:\/|$)/m);
+    for (const name of ["bin/deckard", "extension/popup.html", "share/licenses/model-assets.json"]) {
+      assert.ok(appListing.stdout.split("\n").includes(name));
+    }
     const script = fs.readFileSync(path.join(release, "install.sh"), "utf8");
     const curlLog = path.join(scratch, "curl.log");
     fs.writeFileSync(path.join(commands, "curl"), `#!/bin/bash
@@ -45,13 +56,17 @@ while [ "$#" -gt 0 ]; do
     *) shift ;;
   esac
 done
-[ "$url" = "https://github.com/sgoedecke/deckard/releases/download/v0.6.2/${archiveName}" ]
 [ -n "$output" ]
 printf '%s\\n' "$url" >> "$CURL_LOG"
-cp "$RELEASE_ARCHIVE" "$output"
+case "$url" in
+  "https://github.com/sgoedecke/deckard/releases/download/v0.6.3/${archiveName}") cp "$RELEASE_ARCHIVE" "$output" ;;
+  "https://github.com/sgoedecke/deckard/releases/download/v0.6.3/${appArchiveName}") cp "$APP_ARCHIVE" "$output" ;;
+  *) exit 1 ;;
+esac
+if [ -n "\${MUTATE_MODEL:-}" ]; then printf 'changed during download' > "$MUTATE_MODEL"; fi
 `, { mode: 0o700 });
     const env = { ...process.env, HOME: user, SHELL: "/bin/zsh", ZDOTDIR: user,
-      PATH: `${commands}:/usr/bin:/bin:/usr/sbin:/sbin`, RELEASE_ARCHIVE: archive, CURL_LOG: curlLog };
+      PATH: `${commands}:/usr/bin:/bin:/usr/sbin:/sbin`, RELEASE_ARCHIVE: archive, APP_ARCHIVE: appArchive, CURL_LOG: curlLog };
     delete env.DECKARD_HOME;
     const run = (command, args, input) => spawnSync(command, args, {
       cwd: scratch, env, input, encoding: "utf8", timeout: 300000, maxBuffer: 1024 * 1024,
@@ -76,7 +91,7 @@ cp "$RELEASE_ARCHIVE" "$output"
     const firstProfile = fs.readFileSync(profile, "utf8");
     const extension = JSON.parse(fs.readFileSync(path.join(prefix, "extension/manifest.json")));
     assert.equal(extension.name, "Deckard");
-    assert.equal(extension.version, "0.6.2");
+    assert.equal(extension.version, "0.6.3");
     for (const name of ["core.js", "content.js", "service-worker.js", "popup.html", "popup.js", "popup.css"]) {
       assert.equal(fs.readFileSync(path.join(prefix, "extension", name), "utf8"),
         fs.readFileSync(path.join(root, "extension", name), "utf8"), `Installed extension file is stale: ${name}`);
@@ -93,9 +108,30 @@ cp "$RELEASE_ARCHIVE" "$output"
         binary, path.resolve(process.env.DECKARD_SMOKE_RECEIPT)]);
       assert.equal(smoke.status, 0, smoke.stderr);
     }
+    // Exercise a real upgrade from older Core ML ownership metadata, not just a same-version reinstall.
+    const previous = fs.realpathSync(path.join(prefix, "current"));
+    const previousConfig = { ...JSON.parse(fs.readFileSync(path.join(previous, "install.json"))), version: "0.6.0" };
+    const metadata = canonicalJson(previousConfig);
+    const previousName = `0.6.0-${createHash("sha256").update(metadata).digest("hex").slice(0, 20)}`;
+    fs.writeFileSync(path.join(previous, "install.json"), metadata);
+    fs.renameSync(previous, path.join(prefix, "releases", previousName));
+    fs.unlinkSync(path.join(prefix, "current"));
+    fs.symlinkSync(`releases/${previousName}`, path.join(prefix, "current"));
     result = install();
     assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, /Installed model checksums match/);
+    assert.notEqual(fs.readlinkSync(path.join(prefix, "current")), `releases/${previousName}`);
     assert.equal(fs.readFileSync(profile, "utf8"), firstProfile);
+    const current = fs.readlinkSync(path.join(prefix, "current"));
+    const tokenizer = path.join(prefix, current, "models/tokenizer.json");
+    const originalTokenizer = fs.readFileSync(tokenizer);
+    env.MUTATE_MODEL = tokenizer;
+    result = install();
+    delete env.MUTATE_MODEL;
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /asset_mismatch/);
+    assert.equal(fs.readlinkSync(path.join(prefix, "current")), current);
+    fs.writeFileSync(tokenizer, originalTokenizer);
     const inode = fs.statSync(path.join(prefix, ".install.lock")).ino;
     fs.writeFileSync(path.join(prefix, "personal.txt"), "unrelated");
     result = run(binary, ["uninstall"]);
@@ -112,5 +148,6 @@ cp "$RELEASE_ARCHIVE" "$output"
     assert.equal(result.status, 0, result.stderr);
     assert.equal(fs.readFileSync(profile, "utf8"), original);
     assert.ok(!fs.readdirSync(scratch).some(name => name.startsWith(".deckard-bootstrap.")));
-    assert.equal(fs.readFileSync(curlLog, "utf8").trim().split("\n").length, 3);
+    assert.deepEqual(fs.readFileSync(curlLog, "utf8").trim().split("\n").map(url => url.split("/").at(-1)),
+      [archiveName, appArchiveName, appArchiveName, archiveName]);
   });
