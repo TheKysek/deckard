@@ -18,7 +18,7 @@ function fixture(t, version = currentVersion) {
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   const home = path.join(root, "application with spaces");
   const manifests = path.join(root, "native manifests");
-  const coreml = ["0.6.0", "0.6.1", "0.6.2", currentVersion].includes(version);
+  const coreml = ["0.6.0", "0.6.1", "0.6.2", "0.6.3", currentVersion].includes(version);
   const owned = coreml || ["0.4.0", "0.4.1", "0.5.0"].includes(version);
   const hostName = owned ? host : "com.example.other";
   const registration = path.join(manifests, `${hostName}.json`);
@@ -69,7 +69,7 @@ test("absent uninstall is idempotent and creates no directories", t => {
   }
 });
 
-for (const version of ["0.4.0", "0.4.1", "0.5.0", "0.6.0", "0.6.1", "0.6.2"]) test(`uninstall still recognizes positively owned Deckard ${version} releases`, t => {
+for (const version of ["0.4.0", "0.4.1", "0.5.0", "0.6.0", "0.6.1", "0.6.2", "0.6.3"]) test(`uninstall still recognizes positively owned Deckard ${version} releases`, t => {
   const f = fixture(t, version);
   f.install();
   const result = f.run();

@@ -101,7 +101,7 @@ struct Removal {
 };
 Removal validate_release(const fs::path& release);
 bool coreml_release_version(const Json& version) {
-    return version == app_version || version == "0.6.0" || version == "0.6.1" || version == "0.6.2";
+    return version == app_version || version == "0.6.0" || version == "0.6.1" || version == "0.6.2" || version == "0.6.3";
 }
 bool owned_release_version(const Json& version) {
     return coreml_release_version(version) || version == "0.5.0" || version == "0.4.0" || version == "0.4.1";
@@ -110,7 +110,7 @@ fs::path installation_prefix() {
     auto distribution = executable_path().parent_path().parent_path();
     if (distribution.parent_path().filename() == "releases" && fs::is_regular_file(distribution / "install.json"))
         return distribution.parent_path().parent_path();
-    return user_home() / "Library/Application Support/Deckard";
+    return user_home() / "Deckard";
 }
 void install(const Options& options) {
     allow_options(options, {"--home", "--extension-id", "--manifest-dir", "--model-dir",
@@ -580,7 +580,7 @@ void verify(const Options& options) {
 }
 void help() {
     std::cout <<
-        "Deckard 0.6.3 - native Gradient/Core ML for Apple Silicon macOS15+\n\n"
+        "Deckard 0.6.4 - native Gradient/Core ML for Apple Silicon macOS15+\n\n"
         "deckard install [--extension-id ID] [--replace] [--model-dir DIR]\n"
         "                [--home DIR] [--manifest-dir DIR] [--no-register]\n"
         "                [--extension-dir DIR] [--shell zsh|bash|none] [--no-extension]\n"

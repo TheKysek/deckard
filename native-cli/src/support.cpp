@@ -88,7 +88,7 @@ fs::path default_home() {
     if (override_path && *override_path) return fs::absolute(override_path);
     auto bundled = executable_path().parent_path().parent_path();
     if (fs::is_regular_file(bundled / "install.json")) return bundled;
-    return user_home() / "Library/Application Support/Deckard/current";
+    return user_home() / "Deckard/current";
 }
 std::string read_text(const fs::path& path, size_t limit) {
     if (!fs::is_regular_file(path) || fs::file_size(path) > limit)

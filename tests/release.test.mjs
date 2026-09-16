@@ -23,8 +23,8 @@ test("real release archive installs, upgrades, uninstalls and reinstalls through
     const profile = path.join(user, ".zshrc");
     const original = "# unrelated settings\nexport PERSONAL_TEST_SETTING=preserved";
     fs.writeFileSync(profile, original);
-    const archiveName = "deckard-v0.6.3-macos-arm64.tar.gz";
-    const appArchiveName = "deckard-v0.6.3-macos-arm64-app.tar.gz";
+    const archiveName = "deckard-v0.6.4-macos-arm64.tar.gz";
+    const appArchiveName = "deckard-v0.6.4-macos-arm64-app.tar.gz";
     const archive = path.resolve(release, archiveName);
     const appArchive = path.resolve(release, appArchiveName);
     assert.ok(fs.statSync(archive).size < archiveSizeLimit);
@@ -59,8 +59,8 @@ done
 [ -n "$output" ]
 printf '%s\\n' "$url" >> "$CURL_LOG"
 case "$url" in
-  "https://github.com/sgoedecke/deckard/releases/download/v0.6.3/${archiveName}") cp "$RELEASE_ARCHIVE" "$output" ;;
-  "https://github.com/sgoedecke/deckard/releases/download/v0.6.3/${appArchiveName}") cp "$APP_ARCHIVE" "$output" ;;
+  "https://github.com/sgoedecke/deckard/releases/download/v0.6.4/${archiveName}") cp "$RELEASE_ARCHIVE" "$output" ;;
+  "https://github.com/sgoedecke/deckard/releases/download/v0.6.4/${appArchiveName}") cp "$APP_ARCHIVE" "$output" ;;
   *) exit 1 ;;
 esac
 if [ -n "\${MUTATE_MODEL:-}" ]; then printf 'changed during download' > "$MUTATE_MODEL"; fi
@@ -81,7 +81,7 @@ if [ -n "\${MUTATE_MODEL:-}" ]; then printf 'changed during download' > "$MUTATE
     assert.ok(!fs.existsSync(curlLog));
     assert.equal(fs.readFileSync(profile, "utf8"), original);
     const install = () => run("/bin/bash", ["-s", "--", "--yes", "--no-open", "--shell", "zsh"], script);
-    const prefix = path.join(user, "Library/Application Support/Deckard");
+    const prefix = path.join(user, "Deckard");
     const binary = path.join(prefix, "current/bin/deckard");
     const registration = path.join(user, "Library/Application Support/Google/Chrome/NativeMessagingHosts/com.sgoedecke.deckard.json");
     let result = install();
@@ -91,7 +91,7 @@ if [ -n "\${MUTATE_MODEL:-}" ]; then printf 'changed during download' > "$MUTATE
     const firstProfile = fs.readFileSync(profile, "utf8");
     const extension = JSON.parse(fs.readFileSync(path.join(prefix, "extension/manifest.json")));
     assert.equal(extension.name, "Deckard");
-    assert.equal(extension.version, "0.6.3");
+    assert.equal(extension.version, "0.6.4");
     for (const name of ["core.js", "content.js", "service-worker.js", "popup.html", "popup.js", "popup.css"]) {
       assert.equal(fs.readFileSync(path.join(prefix, "extension", name), "utf8"),
         fs.readFileSync(path.join(root, "extension", name), "utf8"), `Installed extension file is stale: ${name}`);

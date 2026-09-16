@@ -5,7 +5,7 @@ import { execFileSync } from 'node:child_process';
 import { validatePins, verifyAssets, copyAssets, sha256, checkArchiveSize, renderInstaller } from './release-assets.mjs';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const version = '0.6.3';
+const version = '0.6.4';
 const archiveName = `deckard-v${version}-macos-arm64.tar.gz`;
 const appArchiveName = `deckard-v${version}-macos-arm64-app.tar.gz`;
 const options = { '--native-dist': path.join(root, 'native-cli/build/dist'), '--output-dir': path.join(root, `dist/v${version}`) };

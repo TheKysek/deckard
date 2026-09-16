@@ -96,7 +96,7 @@ async function invoke(args = ['--yes', '--shell', 'none'], options = {}) {
   let cachedSource;
   if (options.cachedModel) {
     const index = args.lastIndexOf('--home');
-    const prefix = index >= 0 ? path.resolve(directory, args[index + 1]) : path.join(env.HOME, 'Library/Application Support/Deckard');
+    const prefix = index >= 0 ? path.resolve(directory, args[index + 1]) : path.join(env.HOME, 'Deckard');
     cachedSource = path.join(prefix, 'releases/0.6.0-fixture/models');
     await fs.cp(path.join(scratch, 'bundle/models'), cachedSource, { recursive: true });
     await fs.symlink('releases/0.6.0-fixture', path.join(prefix, 'current'));
@@ -132,7 +132,7 @@ test('curl-piped installer forwards spaces and options to native, which owns set
   assert.equal(result.status, 0, result.stderr);
   assert.match(result.native, /^install\n--home\nan isolated home\n--manifest-dir\nmanifest with spaces\n--extension-id\nabcdefghijklmnopabcdefghijklmnop\n--model-dir\n.*\/bundle\/models\n--extension-dir\n.*\/bundle\/extension\n--shell\nbash\n$/);
   assert.match(result.curl, /--proto\n=https\n--proto-redir\n=https\n/);
-  assert.match(result.curl, /https:\/\/github\.com\/sgoedecke\/deckard\/releases\/download\/v0\.6\.3\/deckard-v0\.6\.3-macos-arm64\.tar\.gz/);
+  assert.match(result.curl, /https:\/\/github\.com\/sgoedecke\/deckard\/releases\/download\/v0\.6\.4\/deckard-v0\.6\.4-macos-arm64\.tar\.gz/);
   assert.ok(!result.files.some(file => file.startsWith('.deckard-bootstrap.')));
 });
 
@@ -146,7 +146,8 @@ test('unchanged model uses only the app archive and passes its resolved local di
   const result = await invoke(undefined, { cachedModel: true });
   assert.equal(result.status, 0, result.stderr);
   assert.match(result.stdout, /Installed model checksums match/);
-  assert.match(result.curl, /deckard-v0\.6\.3-macos-arm64-app\.tar\.gz/);
+  assert.match(result.cachedSource, /\/isolated home\/Deckard\/releases\//);
+  assert.match(result.curl, /deckard-v0\.6\.4-macos-arm64-app\.tar\.gz/);
   assert.ok(result.native.includes(`--model-dir\n${result.cachedSource}\n`));
   assert.doesNotMatch(result.native, /\/bundle\/models/);
   for (const name of modelFiles) {
@@ -170,7 +171,7 @@ test('each missing or changed model file forces the full archive instead of trus
     } });
     assert.equal(result.status, 0, result.stderr);
     assert.match(result.stdout, /No matching installed model/);
-    assert.match(result.curl, /deckard-v0\.6\.3-macos-arm64\.tar\.gz/);
+    assert.match(result.curl, /deckard-v0\.6\.4-macos-arm64\.tar\.gz/);
     assert.match(result.native, /--model-dir\n.*\/bundle\/models\n/);
   }
 });
@@ -180,7 +181,7 @@ test('a new target model checksum selects a full download even when the cached m
   next.files['model.mlpackage/Data/com.apple.CoreML/weights/weight.bin'] = '0'.repeat(64);
   const result = await invoke(undefined, { cachedModel: true, pins: next });
   assert.equal(result.status, 0, result.stderr);
-  assert.match(result.curl, /deckard-v0\.6\.3-macos-arm64\.tar\.gz/);
+  assert.match(result.curl, /deckard-v0\.6\.4-macos-arm64\.tar\.gz/);
 });
 
 test('redirected release pointers and model components are not reused', async () => {
@@ -250,7 +251,7 @@ test('no controlling terminal fails clearly without --yes', async () => {
 test('pipe prompts read from controlling tty, never script stdin', { skip: process.platform !== 'darwin' }, async () => {
   const result = await invoke(['--shell', 'none'], { tty: true });
   assert.equal(result.error, undefined);
-  assert.match(result.stdout, /Install Deckard v0\.6\.3/);
+  assert.match(result.stdout, /Install Deckard v0\.6\.4/);
   assert.match(result.native ?? '', /^install\n/);
 });
 

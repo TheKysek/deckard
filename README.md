@@ -6,21 +6,29 @@ Named after the original AI hunter in _Blade Runner_, Deckard is a Chrome extens
 
 ## Getting started
 
-Install [Deckard v0.6.3](https://github.com/sgoedecke/deckard/releases/tag/v0.6.3)
+Install [Deckard v0.6.4](https://github.com/sgoedecke/deckard/releases/tag/v0.6.4)
 from your terminal:
 
 ```sh
-curl --proto '=https' --tlsv1.2 -fsSL https://github.com/sgoedecke/deckard/releases/download/v0.6.3/install.sh | bash
+curl --proto '=https' --tlsv1.2 -fsSL https://github.com/sgoedecke/deckard/releases/download/v0.6.4/install.sh | bash
 ```
 
 In Chrome:
 
 1. Open `chrome://extensions` and turn on **Developer mode**.
 2. Choose **Load unpacked** and select
-   `~/Library/Application Support/Deckard/extension`
+   `~/Deckard/extension` (the **Deckard** folder in your home folder).
 3. Pin Deckard so you can see it in your extension hotbar
 
 Right now this only works on Apple Silicon macs. If you want to use it on a PC or some other device, PRs are welcome.
+
+The installer defaults to `~/Deckard`; `--home DIR` selects a different location.
+Older installers use `~/Library/Application Support/Deckard`. To move an existing
+installation, first run
+`"$HOME/Library/Application Support/Deckard/current/bin/deckard" uninstall`,
+remove the old extension in Chrome, then install with the new installer and load
+`~/Deckard/extension`. Do not move the folder manually: the native-host registration
+and shell PATH refer to its installed location.
 
 ## How it works
 
@@ -37,7 +45,7 @@ Deckard only scans in 50 word chunks, so short AI-generated content is harder to
 ## Uninstall
 
 Run `deckard uninstall` (or
-`"$HOME/Library/Application Support/Deckard/current/bin/deckard" uninstall`
+`"$HOME/Deckard/current/bin/deckard" uninstall`
 if PATH was not configured). It removes Deckard's managed installation files,
 owned PATH block and native-host registration. Then manually choose **Remove**
 for Deckard at `chrome://extensions`; the CLI cannot remove a Chrome extension.
@@ -64,7 +72,7 @@ scripts/package-release.sh --model-dir /path/to/canonical/mlx-q4
 
 The build reads the external dependency cache without modifying it. Packaging
 also accepts `--native-dist native-cli/build/dist` and
-`--output-dir dist/v0.6.3`. These are maintainer steps, not evidence that a
+`--output-dir dist/v0.6.4`. These are maintainer steps, not evidence that a
 release has been published. Release archives bundle prepared model assets;
 source installs must pass `--model-dir` explicitly. The installer does not
 download or convert upstream FP32 weights automatically.

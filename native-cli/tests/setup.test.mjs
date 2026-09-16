@@ -16,24 +16,40 @@ const key = JSON.parse(fs.readFileSync(path.join(extension, "manifest.json"))).k
 const id = key && [...createHash("sha256").update(Buffer.from(key, "base64")).digest().subarray(0, 16)]
   .map(byte => String.fromCharCode(97 + (byte >> 4), 97 + (byte & 15))).join("");
 
-function fixture(t, shell = "zsh") {
+function fixture(t, shell = "zsh", useDefaultHome = false) {
   const root = fs.mkdtempSync(fileURLToPath(new URL(".setup-", import.meta.url)));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   const user = path.join(root, "user home");
-  const home = path.join(user, "Library/Application Support/Deckard's app");
+  const home = path.join(user, useDefaultHome ? "Deckard" : "Library/Application Support/Deckard's app");
   const manifests = path.join(user, "Chrome manifests");
   fs.mkdirSync(user);
   const profile = path.join(user, shell === "bash" ? ".bash_profile" : ".zshrc");
   const env = { ...process.env, HOME: user, SHELL: `/bin/${shell}`, PATH: "/usr/bin:/bin:/usr/sbin:/sbin" };
   delete env.DECKARD_HOME;
   const run = (command, args = [], extraEnv = {}) => spawnSync(binary,
-    [command, "--home", home, ...args], {
+    [command, ...(useDefaultHome ? [] : ["--home", home]), ...args], {
       encoding: "utf8", timeout: 30000, env: { ...env, ...extraEnv },
     });
   const install = (args = [], extraEnv = {}) => run("install",
     ["--model-dir", model, "--extension-dir", extension, "--manifest-dir", manifests, ...args], extraEnv);
   return { root, user, home, manifests, profile, env, run, install };
 }
+
+test("default installation uses the visible Deckard folder and uninstalls without --home", { skip: !available }, t => {
+  const f = fixture(t, "zsh", true);
+  const result = f.install();
+  assert.equal(result.status, 0, result.stderr);
+  assert.ok(fs.existsSync(path.join(f.home, "extension/manifest.json")));
+  assert.ok(result.stdout.includes(path.join(f.home, "extension")));
+  assert.ok(fs.readFileSync(f.profile, "utf8").includes(path.join(f.home, "current/bin")));
+  const status = f.run("status");
+  assert.equal(status.status, 0, status.stderr);
+  assert.equal(JSON.parse(status.stdout).installation.product, "Deckard");
+  const removed = f.run("uninstall", ["--manifest-dir", f.manifests]);
+  assert.equal(removed.status, 0, removed.stderr);
+  assert.ok(!fs.existsSync(path.join(f.home, "extension")));
+  assert.ok(!fs.existsSync(path.join(f.manifests, manifestName)));
+});
 
 function installPrevious(f) {
   return spawnSync(process.env.DECKARD_PREVIOUS_BIN,

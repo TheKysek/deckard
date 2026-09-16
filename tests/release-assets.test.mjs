@@ -123,10 +123,10 @@ test('installer embeds independent archive hashes and canonical model checksums'
 
 test('release versions and production packaging remain aligned', async () => {
   for (const name of ['package.json', 'extension/manifest.json']) {
-    assert.equal(JSON.parse(await fs.readFile(path.join(root, name), 'utf8')).version, '0.6.3');
+    assert.equal(JSON.parse(await fs.readFile(path.join(root, name), 'utf8')).version, '0.6.4');
   }
   const script = await fs.readFile(path.join(root, 'scripts/package-release.mjs'), 'utf8');
-  assert.match(script, /const version = '0\.6\.3'/);
+  assert.match(script, /const version = '0\.6\.4'/);
   assert.match(script, /native-cli\/model-assets\.json/);
   assert.match(script, /share\/licenses\/model-assets\.json/);
   assert.match(script, /checkArchiveSize\(\(await fs.stat\(archive\)\).size\)/);

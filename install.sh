@@ -14,7 +14,7 @@ deckard_bootstrap() (
   }
   yes=false
   shell_choice=
-  install_home="${HOME-}/Library/Application Support/Deckard"
+  install_home="${HOME-}/Deckard"
   native_options=(install)
   while [ "$#" -gt 0 ]; do
     case "$1" in
@@ -55,7 +55,7 @@ deckard_bootstrap() (
     if ! { exec 3<>/dev/tty; } 2>/dev/null; then
       fail 'No controlling terminal. Re-run with --yes and a supported --shell (or SHELL).'
     fi
-    printf 'Install Deckard v0.6.3 (including Core ML model weights) and configure shell %s? [y/N] ' "$shell_choice" >&3
+    printf 'Install Deckard v0.6.4 (including Core ML model weights) and configure shell %s? [y/N] ' "$shell_choice" >&3
     answer=
     IFS= read -r answer <&3 || fail 'Confirmation could not be read.'
     exec 3>&-
@@ -101,9 +101,9 @@ deckard_bootstrap() (
     done <<< "$model_sums"
     printf '%s\n' "$source"
   )
-  archive_name=deckard-v0.6.3-macos-arm64.tar.gz
+  archive_name=deckard-v0.6.4-macos-arm64.tar.gz
   if model_source=$(cached_model); then
-    archive_name=deckard-v0.6.3-macos-arm64-app.tar.gz
+    archive_name=deckard-v0.6.4-macos-arm64-app.tar.gz
     expected=$app_expected
     printf 'Installed model checksums match. Downloading the app-only update; reusing local model files.\n'
   else
@@ -116,11 +116,11 @@ deckard_bootstrap() (
   trap 'exit 130' INT
   trap 'exit 143' TERM HUP
   archive="$work/$archive_name"
-  url="https://github.com/sgoedecke/deckard/releases/download/v0.6.3/$archive_name"
-  printf 'Downloading Deckard v0.6.3…\n'
+  url="https://github.com/sgoedecke/deckard/releases/download/v0.6.4/$archive_name"
+  printf 'Downloading Deckard v0.6.4…\n'
   curl --fail --location --proto '=https' --proto-redir '=https' \
     --connect-timeout 30 --max-time 1800 --output "$archive" "$url" ||
-    fail 'Download failed. The pinned v0.6.3 release must be published before this installer can be used.'
+    fail 'Download failed. The pinned v0.6.4 release must be published before this installer can be used.'
   archive_bytes=$(wc -c < "$archive")
   [ "$archive_bytes" -gt 0 ] && [ "$archive_bytes" -lt 2147483648 ] ||
     fail 'Release archive must be under 2147483648 bytes (2 GiB).'
