@@ -9,21 +9,19 @@ import { version } from "./model-fixture.mjs";
 
 const binary = process.env.DECKARD_BIN || fileURLToPath(new URL("../build/dist/bin/deckard", import.meta.url));
 const model = process.env.DECKARD_MODEL_DIR;
-const available = !!model && fs.existsSync(path.join(model, "model.mlpackage/Manifest.json"));
+const available = !!model && fs.existsSync(path.join(model, "model.onnx"));
 const extension = fileURLToPath(new URL("../../extension", import.meta.url));
 const manifestName = "com.sgoedecke.deckard.json";
-const key = JSON.parse(fs.readFileSync(path.join(extension, "manifest.json"))).key;
-const id = key && [...createHash("sha256").update(Buffer.from(key, "base64")).digest().subarray(0, 16)]
-  .map(byte => String.fromCharCode(97 + (byte >> 4), 97 + (byte & 15))).join("");
+const id = JSON.parse(fs.readFileSync(path.join(extension, "manifest.json"))).browser_specific_settings.gecko.id;
 
 function fixture(t, shell = "zsh", useDefaultHome = false) {
   const root = fs.mkdtempSync(fileURLToPath(new URL(".setup-", import.meta.url)));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   const user = path.join(root, "user home");
-  const home = path.join(user, useDefaultHome ? "Deckard" : "Library/Application Support/Deckard's app");
-  const manifests = path.join(user, "Chrome manifests");
+  const home = path.join(user, useDefaultHome ? "Deckard" : ".local/share/Deckard's app");
+  const manifests = path.join(user, "Firefox manifests");
   fs.mkdirSync(user);
-  const profile = path.join(user, shell === "bash" ? ".bash_profile" : ".zshrc");
+  const profile = path.join(user, shell === "bash" ? ".bashrc" : ".zshrc");
   const env = { ...process.env, HOME: user, SHELL: `/bin/${shell}`, PATH: "/usr/bin:/bin:/usr/sbin:/sbin" };
   delete env.DECKARD_HOME;
   const run = (command, args = [], extraEnv = {}) => spawnSync(binary,
@@ -57,15 +55,14 @@ function installPrevious(f) {
       "--manifest-dir", f.manifests], { encoding: "utf8", timeout: 30000, env: f.env });
 }
 
-test("the previous MLX release upgrades in place and both versions uninstall together",
+test("the previous Linux release upgrades in place and both versions uninstall together",
   { skip: !available || !process.env.DECKARD_PREVIOUS_BIN || !process.env.DECKARD_PREVIOUS_MODEL_DIR }, t => {
     const f = fixture(t);
     const original = "export PERSONAL=kept";
     fs.writeFileSync(f.profile, original);
     const previous = installPrevious(f);
     assert.equal(previous.status, 0, previous.stderr);
-    assert.ok(["0.4.0", "0.4.1", "0.5.0"].includes(
-      JSON.parse(fs.readFileSync(path.join(f.home, "current/install.json"))).version));
+    assert.notEqual(JSON.parse(fs.readFileSync(path.join(f.home, "current/install.json"))).version, version);
     const profile = fs.readFileSync(f.profile, "utf8");
     const inode = fs.statSync(path.join(f.home, ".install.lock")).ino;
     const upgraded = f.install();
@@ -90,8 +87,8 @@ for (const shell of ["zsh", "bash"]) for (const original of [null, "", "export P
     const content = fs.readFileSync(f.profile, "utf8");
     assert.equal(content.split("# >>> Deckard PATH >>>").length, 2);
     const registration = JSON.parse(fs.readFileSync(path.join(f.manifests, manifestName)));
-    assert.deepEqual(registration.allowed_origins, [`chrome-extension://${id}/`]);
-    assert.equal(JSON.parse(fs.readFileSync(path.join(f.home, "extension/manifest.json"))).key, key);
+    assert.deepEqual(registration.allowed_extensions, [id]);
+    assert.equal(JSON.parse(fs.readFileSync(path.join(f.home, "extension/manifest.json"))).browser_specific_settings.gecko.id, id);
     const command = shell === "zsh" ? "/bin/zsh" : "/bin/bash";
     const profileCheck = spawnSync(command, ["-f", "-c", '. "$HOME/' + path.basename(f.profile) +
       '"; . "$HOME/' + path.basename(f.profile) + '"; command -v deckard; printf "%s\\n" "$PATH"'], {
@@ -215,8 +212,8 @@ test("corrupt model cannot activate or change profile and extension", { skip: !a
   const before = fs.readFileSync(f.profile);
   const current = fs.readlinkSync(path.join(f.home, "current"));
   const bad = path.join(f.root, "bad model");
-  fs.mkdirSync(path.join(bad, "model.mlpackage/Data/com.apple.CoreML"), { recursive: true });
-  fs.writeFileSync(path.join(bad, "model.mlpackage/Data/com.apple.CoreML/model.mlmodel"), "corrupt");
+  fs.cpSync(model, bad, { recursive: true });
+  fs.writeFileSync(path.join(bad, "model.onnx.data"), "corrupt");
   const result = f.run("install", ["--model-dir", bad, "--extension-dir", extension]);
   assert.equal(result.status, 1);
   assert.match(result.stderr, /asset_mismatch/);
@@ -310,7 +307,7 @@ test("interrupted uninstall resumes after PATH removal and partial extension del
   assert.equal(f.run("uninstall").status, 0);
 });
 
-for (const previous of [false, true]) test(`interrupted final release-directory removal validates saved ownership (${previous ? "legacy MLX" : "current"})`,
+for (const previous of [false, true]) test(`interrupted final release-directory removal validates saved ownership (${previous ? "previous" : "current"})`,
   { skip: !available || (previous && (!process.env.DECKARD_PREVIOUS_BIN || !process.env.DECKARD_PREVIOUS_MODEL_DIR)) }, t => {
   const f = fixture(t);
   const installed = previous ? installPrevious(f) : f.install(["--shell", "none"]);

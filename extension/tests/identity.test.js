@@ -1,30 +1,21 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { createHash, createPublicKey } from "node:crypto";
 import { readFileSync } from "node:fs";
 import "../core.js";
 
 const read = path => readFileSync(new URL(path, import.meta.url), "utf8");
 const manifest = JSON.parse(read("../manifest.json"));
-const extensionId = "bkihjdkalohbkgnjjoobababhipefjdg";
+const extensionId = "deckard@thekysek.github.io";
 
-function deriveId(der) {
-  return createHash("sha256").update(der).digest("hex").slice(0, 32)
-    .replace(/[0-9a-f]/g, nibble => String.fromCharCode(97 + parseInt(nibble, 16)));
-}
-
-test("public manifest key reproducibly pins the stable Chrome extension ID", () => {
-  const der = Buffer.from(manifest.key, "base64");
-  assert.equal(der.toString("base64"), manifest.key);
-  const key = createPublicKey({ key: der, type: "spki", format: "der" });
-  assert.equal(key.type, "public");
-  assert.equal(key.asymmetricKeyType, "rsa");
-  assert.deepEqual(key.export({ type: "spki", format: "der" }), der);
-  assert.match(deriveId(der), /^[a-p]{32}$/);
-  assert.equal(deriveId(der), extensionId);
+test("Firefox manifest pins the stable add-on ID shared with the native host", () => {
+  assert.equal(manifest.manifest_version, 3);
+  assert.equal(manifest.key, undefined);
+  assert.equal(manifest.browser_specific_settings.gecko.id, extensionId);
+  assert.equal(manifest.browser_specific_settings.gecko.strict_min_version, "140.0");
+  assert.deepEqual(manifest.background, { scripts: ["service-worker.js"], type: "module" });
   const nativeId = read("../../native-cli/src/support.hpp")
-    .match(/\bdefault_extension_id\s*=\s*"([a-p]{32})"/)?.[1];
-  assert.equal(nativeId, deriveId(der));
+    .match(/\bdefault_extension_id\s*=\s*"([^"]+)"/)?.[1];
+  assert.equal(nativeId, extensionId);
 });
 
 test("Deckard brand, release version and native host remain consistent", () => {
@@ -32,12 +23,12 @@ test("Deckard brand, release version and native host remain consistent", () => {
   assert.equal(manifest.description, "Local AI-text detection for your browser.");
   assert.deepEqual(manifest.host_permissions, ["http://*/*", "https://*/*"]);
   assert.equal(manifest.optional_host_permissions, undefined);
-  assert.equal(manifest.version, "0.6.4");
+  assert.equal(manifest.version, "0.7.0");
   const pkg = JSON.parse(read("../../package.json"));
   assert.equal(pkg.name, "deckard");
   assert.equal(pkg.version, manifest.version);
   const native = read("../../native-cli/src/support.hpp");
-  assert.match(native, /app_version = "0\.6\.4"/);
+  assert.match(native, /app_version = "0\.7\.0"/);
   assert.match(native, /host_name = "com\.sgoedecke\.deckard"/);
   assert.match(read("../service-worker.js"), /connectNative\("com\.sgoedecke\.deckard"\)/);
   assert.match(read("../popup.html"), /<title>Deckard<\/title>/);

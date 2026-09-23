@@ -157,7 +157,7 @@ std::optional<Json> setup_metadata(const fs::path& prefix) {
 void validate_setup(const fs::path& prefix, const Json& metadata, bool upgrading) {
     auto profile = fs::path(metadata.at("profile").get<std::string>());
     if (!profile.empty()) {
-        if (profile != user_home() / ".zshrc" && profile != user_home() / ".bash_profile")
+        if (profile != user_home() / ".zshrc" && profile != user_home() / ".bashrc")
             conflict("The owned profile does not belong to this HOME.");
         require_plain_path(profile, false);
         strip_block(read_text(profile), metadata.at("path_block").get<std::string>());
@@ -177,7 +177,7 @@ SetupTransaction::SetupTransaction(const fs::path& prefix, const fs::path& stage
         if ((*previous_)["manifest_dir"] != manifest_dir.string())
             conflict("This installation uses a different manifest directory.");
     } else if (path_present(prefix_ / "extension")) conflict("An unowned extension directory already exists.");
-    profile_ = shell == "none" ? fs::path() : user_home() / (shell == "zsh" ? ".zshrc" : ".bash_profile");
+    profile_ = shell == "none" ? fs::path() : user_home() / (shell == "zsh" ? ".zshrc" : ".bashrc");
     if (previous_ && (*previous_)["profile"] != profile_.string())
         conflict("Changing the managed shell requires uninstalling first.");
     next_ = {{"format", 1}, {"product", "Deckard"}, {"prefix", prefix_.string()},
@@ -203,8 +203,10 @@ SetupTransaction::SetupTransaction(const fs::path& prefix, const fs::path& stage
     if (!extension.empty()) {
         if (!fs::is_directory(extension)) throw Error("missing_extension", "Pass --extension-dir with the packaged extension.");
         auto manifest = read_json(extension / "manifest.json");
-        if (manifest.value("name", Json()) != "Deckard" || !manifest.value("key", Json()).is_string())
-            throw Error("invalid_extension", "The Deckard extension must contain its stable public key.");
+        const auto gecko = manifest.value("browser_specific_settings", Json::object()).value("gecko", Json::object());
+        if (manifest.value("name", Json()) != "Deckard" || !gecko.is_object() ||
+            !gecko.value("id", Json()).is_string() || !extension_id_valid(gecko["id"].get<std::string>()))
+            throw Error("invalid_extension", "The Deckard extension must declare its stable Firefox add-on ID.");
         fs::create_directory(stage_ / "extension");
         for (const auto& entry : fs::recursive_directory_iterator(extension)) {
             if (entry.is_symlink()) throw Error("invalid_extension", "Packaged extension symlinks are not permitted.");
@@ -275,7 +277,7 @@ void resume_uninstall_setup(const fs::path& prefix, const Json& journal) {
     auto profile = fs::path(metadata.at("profile").get<std::string>());
     validate_inventory(prefix, metadata.at("extension_files"), false);
     if (!profile.empty()) {
-        if (profile != user_home() / ".zshrc" && profile != user_home() / ".bash_profile")
+        if (profile != user_home() / ".zshrc" && profile != user_home() / ".bashrc")
             conflict("The uninstall profile does not belong to this HOME.");
         require_plain_path(profile, false);
         auto contents = path_present(profile) ? read_text(profile) : "";
@@ -377,7 +379,7 @@ void recover_setup(const fs::path& prefix) {
             conflict("Setup metadata changed since installation was interrupted.");
         auto profile = fs::path(next.at("profile").get<std::string>());
         if (!profile.empty()) {
-            if (profile != user_home() / ".zshrc" && profile != user_home() / ".bash_profile")
+            if (profile != user_home() / ".zshrc" && profile != user_home() / ".bashrc")
                 conflict("Interrupted profile does not belong to this HOME.");
             require_plain_path(profile, false);
             auto contents = path_present(profile) ? read_text(profile) : "";

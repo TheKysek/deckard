@@ -17,7 +17,7 @@ async function harness({ enabled = false, granted = true, flagThreshold = global
   const elements = new Map([...html.matchAll(/id="([^"]+)"/g)].map(([, id]) => [id, element()]));
   const calls = [];
   let poll;
-  const chrome = {
+  const browser = {
     runtime: {
       id: "test-id",
       sendMessage: async message => {
@@ -39,7 +39,7 @@ async function harness({ enabled = false, granted = true, flagThreshold = global
     tabs: { query: async () => [tab] },
   };
   vm.runInNewContext(source, {
-    chrome, DeckardCore: globalThis.DeckardCore,
+    browser, DeckardCore: globalThis.DeckardCore,
     document: { getElementById: id => elements.get(id), createElement: element },
     window: { addEventListener: () => {} }, setInterval: callback => { poll = callback; return 1; },
     clearInterval: () => {},
@@ -50,7 +50,7 @@ async function harness({ enabled = false, granted = true, flagThreshold = global
     elements.get("enabled").checked = value;
     elements.get("enabled").events.change();
   };
-  return { elements, calls, chrome, toggle, settle, poll: () => poll() };
+  return { elements, calls, browser, toggle, settle, poll: () => poll() };
 }
 
 test("popup has an On/Off switch, site exclusion, threshold slider, and read-only setup", async () => {
@@ -64,7 +64,7 @@ test("popup has an On/Off switch, site exclusion, threshold slider, and read-onl
   assert.equal(h.elements.get("toggle-label").textContent, "Off");
   assert.equal(h.calls.some(call => call.permission || call.type === "PING"), false);
   assert.equal(h.elements.get("install-command").textContent,
-    '"$HOME/Library/Application Support/Deckard/current/bin/deckard" install --extension-id test-id');
+    '"$HOME/Deckard/current/bin/deckard" install --extension-id test-id');
   assert.equal(h.elements.get("setup").hidden, true);
 });
 
@@ -94,8 +94,8 @@ test("saved exclusions are shown while Off and failed saves restore the persiste
   const h = await harness({ excludedSites: ["example.com"] });
   assert.equal(h.elements.get("site-excluded").checked, true);
   assert.equal(h.elements.get("site-excluded").disabled, false);
-  const original = h.chrome.runtime.sendMessage;
-  h.chrome.runtime.sendMessage = message => message.type === "SET_SITE_EXCLUDED"
+  const original = h.browser.runtime.sendMessage;
+  h.browser.runtime.sendMessage = message => message.type === "SET_SITE_EXCLUDED"
     ? Promise.resolve({ ok: false, error: { message: "Settings write failed." } }) : original(message);
   h.elements.get("site-excluded").checked = false;
   h.elements.get("site-excluded").events.change();
@@ -124,8 +124,8 @@ test("the slider preserves the precise default and only saves when committed", a
 
 test("failed threshold saves display an error and restore the persisted value", async () => {
   const h = await harness({ flagThreshold: 0.9 });
-  const original = h.chrome.runtime.sendMessage;
-  h.chrome.runtime.sendMessage = message => message.type === "SET_THRESHOLD"
+  const original = h.browser.runtime.sendMessage;
+  h.browser.runtime.sendMessage = message => message.type === "SET_THRESHOLD"
     ? Promise.resolve({ ok: false, error: { message: "Settings write failed." } }) : original(message);
   h.elements.get("threshold").value = "70";
   h.elements.get("threshold").events.change(); await h.settle();
@@ -136,23 +136,23 @@ test("failed threshold saves display an error and restore the persisted value", 
 
 test("read-only helper setup appears only when the page reports an error", async () => {
   const h = await harness({ enabled: true });
-  const original = h.chrome.runtime.sendMessage;
-  h.chrome.runtime.sendMessage = message => message.type === "STATUS"
+  const original = h.browser.runtime.sendMessage;
+  h.browser.runtime.sendMessage = message => message.type === "STATUS"
     ? Promise.resolve({ ok: true, result: { state: "error", detail: "Native host unavailable." } })
     : original(message);
   h.poll(); await h.settle();
   assert.equal(h.elements.get("setup").hidden, false);
   assert.equal(h.elements.get("status").hidden, false);
   assert.equal(h.elements.get("status").textContent, "Native host unavailable.");
-  h.chrome.runtime.sendMessage = original;
+  h.browser.runtime.sendMessage = original;
   h.poll(); await h.settle();
   assert.equal(h.elements.get("setup").hidden, true);
 });
 
 test("popup reports marked counts with no hiding or reveal controls", async () => {
   const h = await harness({ enabled: true });
-  const original = h.chrome.runtime.sendMessage;
-  h.chrome.runtime.sendMessage = message => message.type === "STATUS"
+  const original = h.browser.runtime.sendMessage;
+  h.browser.runtime.sendMessage = message => message.type === "STATUS"
     ? Promise.resolve({ ok: true, result: {
       state: "done", detail: "Watching.", analyzed: 4, marked: 1, partial: 2, skipped: 3,
     } }) : original(message);
@@ -206,10 +206,10 @@ test("Off sends a global disable without asking for permission", async () => {
 
 test("late polling cannot overwrite a newer toggle", async () => {
   const h = await harness({ enabled: true });
-  const original = h.chrome.runtime.sendMessage;
+  const original = h.browser.runtime.sendMessage;
   let resolve;
   let first = true;
-  h.chrome.runtime.sendMessage = message => {
+  h.browser.runtime.sendMessage = message => {
     if (message.type === "STATUS" && first) {
       first = false;
       return new Promise(done => { resolve = done; });
@@ -226,10 +226,10 @@ test("late polling cannot overwrite a newer toggle", async () => {
 
 test("current-page word progress and finding buttons navigate without adding settings", async () => {
   const h = await harness({ enabled: true, tab: { id: 1, url: "https://example.com", title: "<img src=x>" } });
-  const original = h.chrome.runtime.sendMessage;
+  const original = h.browser.runtime.sendMessage;
   const findingId = "11111111-1111-4111-8111-111111111111";
   let focused = true;
-  h.chrome.runtime.sendMessage = async message => {
+  h.browser.runtime.sendMessage = async message => {
     if (message.type === "STATUS") return { ok: true, result: {
       state: "done", detail: "", analyzed: 4, marked: 1, partial: 0, skipped: 0,
       scannedWords: 25000, totalWords: 30000, budgetExhausted: true,
@@ -257,7 +257,7 @@ test("current-page word progress and finding buttons navigate without adding set
   focused = false;
   button.events.click(); await h.settle();
   assert.match(h.elements.get("navigation-status").textContent, /no longer available/);
-  h.chrome.runtime.sendMessage = original;
+  h.browser.runtime.sendMessage = original;
   h.toggle(false); await h.settle();
   assert.equal(h.elements.get("results").hidden, true);
   assert.equal(h.elements.get("findings").children.length, 0);
@@ -266,7 +266,7 @@ test("current-page word progress and finding buttons navigate without adding set
 test("private and excluded pages never expose a title or send their tab ID", async () => {
   for (const tab of [
     { id: 1, url: "https://example.com", title: "Private title", incognito: true },
-    { id: 1, url: "chrome://settings", title: "Secret title" },
+    { id: 1, url: "browser://settings", title: "Secret title" },
   ]) {
     const h = await harness({ tab });
     assert.equal(h.elements.get("page-title").textContent, "Page unavailable or private");
@@ -278,8 +278,8 @@ test("private and excluded pages never expose a title or send their tab ID", asy
 
 test("zero analyzed pages show only compact counters", async () => {
   const h = await harness({ enabled: true });
-  const original = h.chrome.runtime.sendMessage;
-  h.chrome.runtime.sendMessage = message => message.type === "STATUS"
+  const original = h.browser.runtime.sendMessage;
+  h.browser.runtime.sendMessage = message => message.type === "STATUS"
     ? Promise.resolve({ ok: true, result: { state: "done", analyzed: 0, marked: 0, findings: [] } })
     : original(message);
   h.poll(); await h.settle();
@@ -289,10 +289,10 @@ test("zero analyzed pages show only compact counters", async () => {
 
 test("a late finding-navigation response cannot restore results after Off", async () => {
   const h = await harness({ enabled: true });
-  const original = h.chrome.runtime.sendMessage;
+  const original = h.browser.runtime.sendMessage;
   let release;
   let on = true;
-  h.chrome.runtime.sendMessage = message => {
+  h.browser.runtime.sendMessage = message => {
     if (message.type === "SET_ENABLED") on = message.enabled;
     if (message.type === "STATUS" && on) return Promise.resolve({ ok: true, result: {
       state: "done", analyzed: 1, marked: 1,

@@ -2,8 +2,8 @@
   "use strict";
   const C = globalThis.DeckardCore;
   const $ = id => document.getElementById(id);
-  $("extension-id").textContent = chrome.runtime.id;
-  $("install-command").textContent = `"$HOME/Library/Application Support/Deckard/current/bin/deckard" install --extension-id ${chrome.runtime.id}`;
+  $("extension-id").textContent = browser.runtime.id;
+  $("install-command").textContent = `"$HOME/Deckard/current/bin/deckard" install --extension-id ${browser.runtime.id}`;
   let tabId;
   let hostname;
   let busy = false;
@@ -14,7 +14,7 @@
   let findingsKey = "";
   let navigationGeneration = 0;
   async function request(message) {
-    const response = await chrome.runtime.sendMessage(message);
+    const response = await browser.runtime.sendMessage(message);
     if (!response?.ok) throw new Error(response?.error?.message || "Extension request failed.");
     return response.result;
   }
@@ -101,9 +101,9 @@
     renderResults({}, false);
     $("progress").textContent = "";
     $("scan-progress").hidden = true;
-    // Chrome requires this call directly in the toggle gesture, before any await.
+    // Firefox requires this call directly in the toggle gesture, before any await.
     // Already-granted access does not prompt again.
-    const grant = enabled ? chrome.permissions.request({ origins: C.HOST_PERMISSIONS }) : Promise.resolve(true);
+    const grant = enabled ? browser.permissions.request({ origins: C.HOST_PERMISSIONS }) : Promise.resolve(true);
     busy = true;
     disableControls(true);
     void (async () => {
@@ -180,7 +180,7 @@
   $("threshold").addEventListener("change", saveThreshold);
   $("threshold").addEventListener("blur", () => { if (editingThreshold) saveThreshold(); });
   async function initialize() {
-    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+    const [tab] = await browser.tabs.query({ active: true, currentWindow: true });
     const safe = tab && !tab.incognito && C.originOf(tab.url);
     tabId = safe ? tab.id : undefined;
     hostname = safe ? C.hostnameOf(tab.url) : null;

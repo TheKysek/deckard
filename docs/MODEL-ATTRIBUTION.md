@@ -23,22 +23,26 @@ Deckard uses **Gradient — AI-Generated Text Detector**, published by
 
 ## Deckard's adaptation and interpretation
 
-The Deckard v0.6.0 production backend uses a local Core ML FP16 package,
-derived by decoding the canonical MLX q4 artifact and converting that model to
-FP16. It does **not** restore original FP32 weights or perform 4-bit ANE
-arithmetic. The historical v0.5.0 backend used MLX/Metal q4 directly.
+Deckard's canonical weights are an MLX affine q4 (64-value group) quantization of
+the upstream FP32 checkpoint, first shipped in v0.5.0. The v0.6 macOS backend
+decoded them into a Core ML FP16 package. This Linux/Firefox build (v0.7.0)
+instead exports them to ONNX: every 4-bit code and FP16 scale is kept as is
+(`MatMulNBits` with float zero points), and the model runs on the CPU with
+ONNX Runtime, with FP32 activations. It does **not** restore the original FP32
+weights.
 
 The canonical source `packed.safetensors` SHA-256 remains provenance:
 `85a9e02ebdcbbe1dd84cdbf893b708e44ee4691cadc7e1a4780039e22097ac98`.
-That packed file is not shipped in v0.6.0. The converted package's three files
-and `tokenizer.json` have exact hashes in
+That packed file is not shipped. The exported `model.onnx`, `model.onnx.data` and
+`tokenizer.json` have exact hashes in
 [`native-cli/model-assets.json`](../native-cli/model-assets.json); the native
-binary embeds those pins. GitHub release bundles include the converted model
-and tokenizer, rather than downloading a separate model from Hugging Face.
+binary embeds those pins. GitHub release bundles include the exported model and
+tokenizer rather than downloading a separate model from Hugging Face.
+`native-cli/onnx/export.py` reproduces the export and checks it against a
+PyTorch reference of the same weights.
 
-Production uses public Core ML CPU/Neural Engine compute units and default
-scheduling, with no GPU fallback or private ANE hooks. It preserves the bounded,
-windowed scoring policy
+Production uses the CPU only and default scheduling, with no GPU execution
+provider. It preserves the bounded, windowed scoring policy
 `gradient-q4-two-scale-v1`. The [native protocol](NATIVE-PROTOCOL.md)
 specifies the exact model identity, 50-word minimum, coverage and score checks.
 It scores up to four windows per supplied passage and uses the maximum scored

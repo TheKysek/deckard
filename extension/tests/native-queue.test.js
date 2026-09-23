@@ -46,15 +46,15 @@ test("75-word helpers fail closed instead of silently skipping 50-word passages"
   }
 });
 
-test("Core ML default priority and legacy background hosts share the protocol", async () => {
+test("ONNX default priority and legacy background hosts share the protocol", async () => {
   const h = harness();
-  const coreml = { ...ready, runtime: "native-coreml", scheduling: "default" };
+  const onnx = { ...ready, runtime: "native-onnx", scheduling: "default" };
   const ping = h.queue.request("ping");
-  h.reply(coreml);
-  assert.deepEqual(await ping, coreml);
+  h.reply(onnx);
+  assert.deepEqual(await ping, onnx);
   assert.equal(validResult("ping", { ...ready, runtime: "native-mlx-0.32.2" }), true);
   for (const scheduling of [undefined, null, "foreground", "utility", 21]) {
-    assert.equal(validResult("ping", { ...coreml, scheduling }), false);
+    assert.equal(validResult("ping", { ...onnx, scheduling }), false);
   }
   h.queue.disconnect();
 });

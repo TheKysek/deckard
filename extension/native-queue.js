@@ -109,7 +109,7 @@ export class NativeQueue {
         port.onMessage.addListener(message => { if (this.port === port) this.receive(message); });
         port.onDisconnect.addListener(() => {
           if (this.port !== port) return;
-          const message = port.error?.message || globalThis.chrome?.runtime?.lastError?.message
+          const message = port.error?.message || globalThis.browser?.runtime?.lastError?.message
             || "Native helper disconnected. Check installation, then turn Off and On to retry.";
           this.failAll(new NativeError("disconnected", message));
         });

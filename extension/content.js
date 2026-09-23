@@ -2,9 +2,13 @@
   "use strict";
   if (globalThis.__deckardLocal) return;
   globalThis.__deckardLocal = true;
+  // Firefox has no documentId: the worker authorizes this document by a token that
+  // only this isolated-world instance knows and its executeScript probe can read.
+  const documentToken = crypto.randomUUID();
+  globalThis.__deckardDocumentToken = documentToken;
   const C = globalThis.DeckardCore;
   if (!C || !C.originOf(location.href) || window.top !== window) return;
-  const runtime = chrome.runtime;
+  const runtime = browser.runtime;
   const suffix = crypto.randomUUID().replaceAll("-", "");
   const flagClass = `deckard-marked-${suffix}`;
   const records = new Map();
@@ -44,9 +48,9 @@
   async function request(message) {
     try {
       if (invalidated || !runtime.id) throw new Error("Extension context invalidated.");
-      // Chrome can throw synchronously after an extension reload, before returning a promise.
+      // Messaging can throw synchronously after an extension reload, before returning a promise.
       const response = await runtime.sendMessage({ ...message, protocol_version: C.PROTOCOL_VERSION,
-        scanner_version: C.SCANNER_VERSION, page_url: location.href });
+        scanner_version: C.SCANNER_VERSION, page_url: location.href, document_token: documentToken });
       if (invalidated || !runtime.id) throw new Error("Extension context invalidated.");
       if (!response?.ok) {
         const error = new Error(response?.error?.message || "Extension unavailable. Reload the page.");
@@ -134,7 +138,7 @@
     }
     if (block.parts.some(part => !part.whole) && (!view.CSS?.highlights || !view.Highlight)) {
       status.state = "error";
-      updateStatus("This Chrome version cannot highlight split passages. Update Chrome and reload this page.");
+      updateStatus("This Firefox version cannot highlight split passages. Update Firefox and reload this page.");
       return false;
     }
     ensureStyles();
@@ -547,6 +551,8 @@
   });
   runtime.onMessage.addListener((message, sender, respond) => {
     if (sender.id !== runtime.id || sender.tab || !message || typeof message.type !== "string") return false;
+    // Messages bound to an earlier document in this tab are not for this one.
+    if (message.documentToken !== undefined && message.documentToken !== documentToken) return false;
     if (message.type === "PAGE_STATUS") { respond({ ...status }); return false; }
     if (message.type === "FOCUS_FINDING") {
       const record = [...records.values()].find(value => value.id === message.findingId);

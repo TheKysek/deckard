@@ -4,6 +4,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
+import { existsSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { gzipSync } from 'node:zlib';
 import { modelFiles, renderInstaller } from '../scripts/release-assets.mjs';
@@ -27,8 +28,7 @@ before(async () => {
   template = await fs.readFile(path.join(root, 'install.sh'), 'utf8');
   pins = JSON.parse(await fs.readFile(path.join(root, 'native-cli/model-assets.json'), 'utf8'));
   pins.files = Object.fromEntries(modelFiles.map(name => [name, hash('fixture')]));
-  await executable('uname', 'case "$1" in -s) echo "${MOCK_OS:-Darwin}";; -m) echo "${MOCK_ARCH:-arm64}";; esac');
-  await executable('sw_vers', 'echo "${MOCK_VERSION:-15.0}"');
+  await executable('uname', 'case "$1" in -s) echo "${MOCK_OS:-Linux}";; -m) echo "${MOCK_ARCH:-x86_64}";; esac');
   await executable('tar', `
 case " $* " in
   *" -tzf "*) if [ -n "\${MOCK_ENTRIES:-}" ]; then cat "$MOCK_ENTRIES"; exit; fi ;;
@@ -55,18 +55,18 @@ case "$url" in
 esac
 `);
   const bundle = path.join(scratch, 'bundle');
-  for (const dir of ['bin', 'share/licenses', 'extension', 'models/model.mlpackage/Data/com.apple.CoreML/weights']) await fs.mkdir(path.join(bundle, dir), { recursive: true });
+  for (const dir of ['bin', 'lib', 'share/licenses', 'extension', 'models']) await fs.mkdir(path.join(bundle, dir), { recursive: true });
   await fs.writeFile(path.join(bundle, 'bin/deckard'), '#!/bin/bash\nprintf "%s\\n" "$@" > "$NATIVE_LOG"\nexit "${NATIVE_EXIT:-0}"\n', { mode: 0o755 });
-  for (const file of ['share/licenses/LICENSE', 'extension/manifest.json', 'models/model.mlpackage/Manifest.json',
-    'models/model.mlpackage/Data/com.apple.CoreML/model.mlmodel', 'models/model.mlpackage/Data/com.apple.CoreML/weights/weight.bin', 'models/tokenizer.json']) {
+  for (const file of ['share/licenses/LICENSE', 'extension/manifest.json', 'lib/libonnxruntime.so.1',
+    'models/model.onnx', 'models/model.onnx.data', 'models/tokenizer.json']) {
     await fs.writeFile(path.join(bundle, file), 'fixture');
   }
   archive = path.join(scratch, 'bundle.tar.gz');
-  const result = spawnSync('/usr/bin/tar', ['-czf', archive, '-C', bundle, 'bin', 'share', 'extension', 'models']);
+  const result = spawnSync('/usr/bin/tar', ['-czf', archive, '-C', bundle, 'bin', 'lib', 'share', 'extension', 'models']);
   assert.equal(result.status, 0, result.stderr?.toString());
   digest = hash(await fs.readFile(archive));
   appArchive = path.join(scratch, 'app.tar.gz');
-  const appResult = spawnSync('/usr/bin/tar', ['-czf', appArchive, '-C', bundle, 'bin', 'share', 'extension']);
+  const appResult = spawnSync('/usr/bin/tar', ['-czf', appArchive, '-C', bundle, 'bin', 'lib', 'share', 'extension']);
   assert.equal(appResult.status, 0, appResult.stderr?.toString());
   appDigest = hash(await fs.readFile(appArchive));
 });
@@ -77,7 +77,7 @@ async function invoke(args = ['--yes', '--shell', 'none'], options = {}) {
   await fs.mkdir(directory);
   const script = options.script ?? renderInstaller(template, {
     archiveSha256: options.digest ?? digest, appSha256: options.appDigest ?? appDigest,
-    pins: options.pins ?? pins,
+    pins: options.pins ?? pins, arch: 'x86_64',
   });
   const scriptFile = path.join(directory, 'installer.sh');
   await fs.writeFile(scriptFile, script);
@@ -97,9 +97,9 @@ async function invoke(args = ['--yes', '--shell', 'none'], options = {}) {
   if (options.cachedModel) {
     const index = args.lastIndexOf('--home');
     const prefix = index >= 0 ? path.resolve(directory, args[index + 1]) : path.join(env.HOME, 'Deckard');
-    cachedSource = path.join(prefix, 'releases/0.6.0-fixture/models');
+    cachedSource = path.join(prefix, 'releases/0.7.0-fixture/models');
     await fs.cp(path.join(scratch, 'bundle/models'), cachedSource, { recursive: true });
-    await fs.symlink('releases/0.6.0-fixture', path.join(prefix, 'current'));
+    await fs.symlink('releases/0.7.0-fixture', path.join(prefix, 'current'));
     if (options.alterCache) await options.alterCache({ prefix, source: cachedSource });
   }
   const ttyScript = path.join(directory, 'tty.exp');
@@ -128,11 +128,11 @@ exit [lindex $result 3]
 }
 
 test('curl-piped installer forwards spaces and options to native, which owns setup', async () => {
-  const result = await invoke(['--yes', '--shell', 'bash', '--home', 'an isolated home', '--manifest-dir', 'manifest with spaces', '--extension-id', 'abcdefghijklmnopabcdefghijklmnop']);
+  const result = await invoke(['--yes', '--shell', 'bash', '--home', 'an isolated home', '--manifest-dir', 'manifest with spaces', '--extension-id', 'deckard@example.org']);
   assert.equal(result.status, 0, result.stderr);
-  assert.match(result.native, /^install\n--home\nan isolated home\n--manifest-dir\nmanifest with spaces\n--extension-id\nabcdefghijklmnopabcdefghijklmnop\n--model-dir\n.*\/bundle\/models\n--extension-dir\n.*\/bundle\/extension\n--shell\nbash\n$/);
+  assert.match(result.native, /^install\n--home\nan isolated home\n--manifest-dir\nmanifest with spaces\n--extension-id\ndeckard@example\.org\n--model-dir\n.*\/bundle\/models\n--extension-dir\n.*\/bundle\/extension\n--shell\nbash\n$/);
   assert.match(result.curl, /--proto\n=https\n--proto-redir\n=https\n/);
-  assert.match(result.curl, /https:\/\/github\.com\/sgoedecke\/deckard\/releases\/download\/v0\.6\.4\/deckard-v0\.6\.4-macos-arm64\.tar\.gz/);
+  assert.match(result.curl, /https:\/\/github\.com\/thekysek\/deckard\/releases\/download\/v0\.7\.0\/deckard-v0\.7\.0-linux-x86_64\.tar\.gz/);
   assert.ok(!result.files.some(file => file.startsWith('.deckard-bootstrap.')));
 });
 
@@ -147,7 +147,7 @@ test('unchanged model uses only the app archive and passes its resolved local di
   assert.equal(result.status, 0, result.stderr);
   assert.match(result.stdout, /Installed model checksums match/);
   assert.match(result.cachedSource, /\/isolated home\/Deckard\/releases\//);
-  assert.match(result.curl, /deckard-v0\.6\.4-macos-arm64-app\.tar\.gz/);
+  assert.match(result.curl, /deckard-v0\.7\.0-linux-x86_64-app\.tar\.gz/);
   assert.ok(result.native.includes(`--model-dir\n${result.cachedSource}\n`));
   assert.doesNotMatch(result.native, /\/bundle\/models/);
   for (const name of modelFiles) {
@@ -160,7 +160,7 @@ test('model reuse honors a relative custom --home with spaces', async () => {
   const result = await invoke(['--yes', '--shell', 'none', '--home', 'custom installation'], { cachedModel: true });
   assert.equal(result.status, 0, result.stderr);
   assert.match(result.curl, /-app\.tar\.gz/);
-  assert.match(result.native, /--home\ncustom installation\n--model-dir\ncustom installation\/releases\/0.6.0-fixture\/models\n/);
+  assert.match(result.native, /--home\ncustom installation\n--model-dir\ncustom installation\/releases\/0.7.0-fixture\/models\n/);
 });
 
 test('each missing or changed model file forces the full archive instead of trusting metadata', async () => {
@@ -171,21 +171,21 @@ test('each missing or changed model file forces the full archive instead of trus
     } });
     assert.equal(result.status, 0, result.stderr);
     assert.match(result.stdout, /No matching installed model/);
-    assert.match(result.curl, /deckard-v0\.6\.4-macos-arm64\.tar\.gz/);
+    assert.match(result.curl, /deckard-v0\.7\.0-linux-x86_64\.tar\.gz/);
     assert.match(result.native, /--model-dir\n.*\/bundle\/models\n/);
   }
 });
 
 test('a new target model checksum selects a full download even when the cached model is intact', async () => {
   const next = structuredClone(pins);
-  next.files['model.mlpackage/Data/com.apple.CoreML/weights/weight.bin'] = '0'.repeat(64);
+  next.files['model.onnx.data'] = '0'.repeat(64);
   const result = await invoke(undefined, { cachedModel: true, pins: next });
   assert.equal(result.status, 0, result.stderr);
-  assert.match(result.curl, /deckard-v0\.6\.4-macos-arm64\.tar\.gz/);
+  assert.match(result.curl, /deckard-v0\.7\.0-linux-x86_64\.tar\.gz/);
 });
 
 test('redirected release pointers and model components are not reused', async () => {
-  for (const target of ['pointer', 'dot-pointer', 'model.mlpackage/Data', 'tokenizer.json']) {
+  for (const target of ['pointer', 'dot-pointer', 'model.onnx.data', 'tokenizer.json']) {
     const result = await invoke(undefined, { cachedModel: true, alterCache: async ({ prefix, source }) => {
       if (target === 'pointer' || target === 'dot-pointer') {
         await fs.unlink(path.join(prefix, 'current'));
@@ -212,9 +212,9 @@ test('invalid app archive checksums and failed app downloads do not install or s
   }
 });
 
-test('--yes --no-open installs without launching or probing Chrome', async () => {
-  await executable('open', 'printf "unexpected browser launch\\n" > "$OPEN_LOG"; exit 88');
-  await executable('osascript', 'printf "unexpected browser probe\\n" > "$OPEN_LOG"; exit 89');
+test('--yes --no-open installs without launching or probing Firefox', async () => {
+  await executable('xdg-open', 'printf "unexpected browser launch\\n" > "$OPEN_LOG"; exit 88');
+  await executable('firefox', 'printf "unexpected browser probe\\n" > "$OPEN_LOG"; exit 89');
   const openLog = path.join(scratch, 'unexpected-open.log');
   const result = await invoke(['--yes', '--no-open', '--shell', 'none'], { env: { OPEN_LOG: openLog } });
   assert.equal(result.status, 0, result.stderr);
@@ -223,12 +223,12 @@ test('--yes --no-open installs without launching or probing Chrome', async () =>
   await assert.rejects(fs.stat(openLog), { code: 'ENOENT' });
 });
 
-test('help documents explicit no-open and manual Chrome setup', async () => {
+test('help documents explicit no-open and manual Firefox setup', async () => {
   const result = await invoke(['--help']);
   assert.equal(result.status, 0, result.stderr);
   assert.match(result.stdout, /--no-open/);
   assert.match(result.stdout, /never opened automatically/);
-  assert.match(result.stdout, /load the extension manually/);
+  assert.match(result.stdout, /add the extension to Firefox/);
   assert.equal(result.curl, null);
 });
 
@@ -248,14 +248,15 @@ test('no controlling terminal fails clearly without --yes', async () => {
   assert.equal(result.curl, null);
 });
 
-test('pipe prompts read from controlling tty, never script stdin', { skip: process.platform !== 'darwin' }, async () => {
+const noExpect = !existsSync('/usr/bin/expect') && 'expect is not installed';
+test('pipe prompts read from controlling tty, never script stdin', { skip: noExpect }, async () => {
   const result = await invoke(['--shell', 'none'], { tty: true });
   assert.equal(result.error, undefined);
-  assert.match(result.stdout, /Install Deckard v0\.6\.4/);
+  assert.match(result.stdout, /Install Deckard v0\.7\.0/);
   assert.match(result.native ?? '', /^install\n/);
 });
 
-test('tty decline performs no download or installation', { skip: process.platform !== 'darwin' }, async () => {
+test('tty decline performs no download or installation', { skip: noExpect }, async () => {
   const result = await invoke(['--shell', 'none'], { tty: true, answer: 'n' });
   assert.equal(result.error, undefined);
   assert.match(result.stdout, /Installation cancelled/);
@@ -272,10 +273,11 @@ test('invalid options and missing values fail before download', async () => {
 });
 
 test('unsupported platforms fail before download', async () => {
-  for (const env of [{ MOCK_OS: 'Linux' }, { MOCK_ARCH: 'x86_64' }, { MOCK_VERSION: '14.7' }, { MOCK_VERSION: 'invalid' }]) {
+  for (const env of [{ MOCK_OS: 'Darwin' }, { MOCK_OS: 'FreeBSD' }, { MOCK_ARCH: 'aarch64' }, { MOCK_ARCH: 'arm64' },
+    { MOCK_ARCH: 'i686' }]) {
     const result = await invoke(undefined, { env });
     assert.notEqual(result.status, 0);
-    assert.match(result.stderr, /macOS/);
+    assert.match(result.stderr, env.MOCK_OS ? /Linux is required/ : /installer is for Linux x86_64; build from source/);
     assert.equal(result.curl, null);
   }
 });
@@ -302,7 +304,7 @@ test('archive bytes must be strictly below the GitHub asset size limit', async (
   assert.equal(result.native, null);
 });
 
-test('expanded archive bounds permit the FP16 model but reject oversized members and totals', async () => {
+test('expanded archive bounds permit the model but reject oversized members and totals', async () => {
   const details = path.join(scratch, 'bounded-details');
   for (const [listing, allowed] of [
     ['-rw-r--r--  0 0 0 978321408 Jan 1 00:00 models/weights\n', true],
@@ -331,18 +333,13 @@ test('archive entry count is bounded before extraction', async () => {
   assert.equal(result.native, null);
 });
 
-test('each nested Core ML file and the tokenizer is required', async () => {
-  for (const name of [
-    'model.mlpackage/Manifest.json',
-    'model.mlpackage/Data/com.apple.CoreML/model.mlmodel',
-    'model.mlpackage/Data/com.apple.CoreML/weights/weight.bin',
-    'tokenizer.json',
-  ]) {
+test('each ONNX model file, the tokenizer and the bundled runtime are required', async () => {
+  for (const name of ['models/model.onnx', 'models/model.onnx.data', 'models/tokenizer.json', 'lib/libonnxruntime.so.1']) {
     const bundle = path.join(scratch, `incomplete-${++sequence}`);
     await fs.cp(path.join(scratch, 'bundle'), bundle, { recursive: true });
-    await fs.rm(path.join(bundle, 'models', name));
+    await fs.rm(path.join(bundle, name));
     const file = `${bundle}.tar.gz`;
-    const packed = spawnSync('/usr/bin/tar', ['-czf', file, '-C', bundle, 'bin', 'share', 'extension', 'models']);
+    const packed = spawnSync('/usr/bin/tar', ['-czf', file, '-C', bundle, 'bin', 'lib', 'share', 'extension', 'models']);
     assert.equal(packed.status, 0, packed.stderr?.toString());
     const result = await invoke(undefined, { archive: file, digest: hash(await fs.readFile(file)) });
     assert.notEqual(result.status, 0);
@@ -398,6 +395,8 @@ test('archive traversal, links, special files and duplicate paths are rejected b
     [tarEntry('models/directory'), tarEntry('models/directory/', '5')],
     [tarEntry('models/packed.safetensors')],
     [tarEntry('lib/libmlx.dylib')],
+    [tarEntry('models/model.mlpackage/Manifest.json')],
+    [tarEntry('etc/unexpected')],
     [tarEntry('share/licenses/MLX-LICENSE')],
   ];
   for (const entries of cases) {
