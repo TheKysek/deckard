@@ -83,7 +83,7 @@ async function harness({ auto = false, count = 1, getConfig, budget = 25000, dua
   let timerCount = 0;
   let observer;
   const settings = { enabled: auto };
-  const chrome = { runtime: { id: "test-id",
+  const browser = { runtime: { id: "test-id",
     onMessage: { addListener: listener => listeners.push(listener) },
     sendMessage: message => {
       requests.push(message);
@@ -116,7 +116,7 @@ async function harness({ auto = false, count = 1, getConfig, budget = 25000, dua
   window.top = window;
   let id = 0;
   const context = vm.createContext({
-    document, window, chrome, location: { href: "https://example.com/article" },
+    document, window, browser, location: { href: "https://example.com/article" },
     crypto: { randomUUID: () => `id-${++id}` },
     DeckardCore: { ...globalThis.DeckardCore, MAX_PAGE_WORDS: budget,
       contextSources: dual ? globalThis.DeckardCore.contextSources
@@ -329,13 +329,13 @@ test("site exclusion notifications restore existing marks and unexcluding reuses
 
 test("site exclusion rejects outstanding inference and late enabled configuration", async () => {
   const h = await harness({ auto: true });
-  const original = h.context.chrome.runtime.sendMessage;
+  const original = h.context.browser.runtime.sendMessage;
   let release;
-  h.context.chrome.runtime.sendMessage = message => message.type === "GET_CONFIG"
+  h.context.browser.runtime.sendMessage = message => message.type === "GET_CONFIG"
     ? new Promise(resolve => { release = resolve; }) : original(message);
   const stale = h.send({ type: "SETTINGS_CHANGED" });
   await h.settle();
-  h.context.chrome.runtime.sendMessage = original;
+  h.context.browser.runtime.sendMessage = original;
   h.settings.enabled = false;
   await h.send({ type: "SETTINGS_CHANGED" });
   release({ ok: true, result: { enabled: true } });
@@ -435,7 +435,7 @@ test("synchronous context invalidation during Stop finishes cleanup without unca
   const h = await harness({ auto: true, count: 2 });
   await h.finish(0);
   let calls = 0;
-  h.context.chrome.runtime.sendMessage = () => {
+  h.context.browser.runtime.sendMessage = () => {
     calls++;
     throw new Error("Extension context invalidated.");
   };
@@ -461,7 +461,7 @@ test("context invalidation during SPA navigation retires all navigation handlers
   const navigate = h.navigationEvents.get("currententrychange");
   const pageShow = h.windowEvents.get("pageshow");
   let calls = 0;
-  h.context.chrome.runtime.sendMessage = () => {
+  h.context.browser.runtime.sendMessage = () => {
     calls++;
     throw new Error("Extension context invalidated.");
   };
@@ -480,8 +480,8 @@ test("context invalidation during SPA navigation retires all navigation handlers
 
 test("asynchronous context invalidation in progress reporting removes marks and discards in-flight results", async () => {
   const h = await harness({ auto: true, count: 2 });
-  const original = h.context.chrome.runtime.sendMessage;
-  h.context.chrome.runtime.sendMessage = message => message.type === "PAGE_PROGRESS"
+  const original = h.context.browser.runtime.sendMessage;
+  h.context.browser.runtime.sendMessage = message => message.type === "PAGE_PROGRESS"
     ? Promise.reject(new Error("Extension context invalidated.")) : original(message);
   await h.finish(0);
   assert.equal(h.blocks[0].classes.size, 0);
@@ -495,7 +495,7 @@ test("asynchronous context invalidation in progress reporting removes marks and 
 test("missing runtime identity rejects late results without another message or page annotation", async () => {
   const h = await harness({ auto: true });
   const count = h.requests.length;
-  delete h.context.chrome.runtime.id;
+  delete h.context.browser.runtime.id;
   await h.finish();
   assert.equal(h.blocks[0].classes.size, 0);
   assert.equal(h.requests.length, count);
@@ -508,7 +508,7 @@ test("missing runtime identity before a request cleans up without invoking the i
   await h.finish();
   const pageHide = h.windowEvents.get("pagehide");
   const count = h.requests.length;
-  delete h.context.chrome.runtime.id;
+  delete h.context.browser.runtime.id;
   assert.doesNotThrow(pageHide);
   await h.settle();
   assert.equal(h.requests.length, count);
@@ -520,14 +520,14 @@ test("missing runtime identity before a request cleans up without invoking the i
 test("ordinary synchronous messaging errors remain visible and allow a later retry", async () => {
   const h = await harness({ auto: true });
   await h.finish();
-  const original = h.context.chrome.runtime.sendMessage;
-  h.context.chrome.runtime.sendMessage = () => { throw new Error("Unexpected messaging failure."); };
+  const original = h.context.browser.runtime.sendMessage;
+  h.context.browser.runtime.sendMessage = () => { throw new Error("Unexpected messaging failure."); };
   await h.send({ type: "SETTINGS_CHANGED" });
   const status = await h.send({ type: "PAGE_STATUS" });
   assert.equal(status.state, "error");
   assert.match(status.detail, /Unexpected messaging failure/);
   assert.equal(h.windowEvents.size, 4);
-  h.context.chrome.runtime.sendMessage = original;
+  h.context.browser.runtime.sendMessage = original;
   await h.send({ type: "START" });
   await h.settle();
   assert.equal((await h.send({ type: "PAGE_STATUS" })).state, "done");
@@ -631,9 +631,9 @@ test("Off removes only the marking class and preserves original and updated inli
 test("Stop prevents pending SPA configuration from restarting automatic scanning", async () => {
   const h = await harness({ auto: true });
   await h.finish();
-  const original = h.context.chrome.runtime.sendMessage;
+  const original = h.context.browser.runtime.sendMessage;
   let reply;
-  h.context.chrome.runtime.sendMessage = message => message.type === "GET_CONFIG"
+  h.context.browser.runtime.sendMessage = message => message.type === "GET_CONFIG"
     ? new Promise(resolve => { reply = resolve; }) : original(message);
   h.context.location.href = "https://example.com/next";
   await h.send({ type: "NAVIGATED" });
@@ -658,8 +658,8 @@ test("Off prevents delayed initial configuration from starting any work", async 
 test("Off prevents a late BEGIN_SCAN response from scheduling inference", async () => {
   const h = await harness();
   let reply;
-  const original = h.context.chrome.runtime.sendMessage;
-  h.context.chrome.runtime.sendMessage = message => message.type === "BEGIN_SCAN"
+  const original = h.context.browser.runtime.sendMessage;
+  h.context.browser.runtime.sendMessage = message => message.type === "BEGIN_SCAN"
     ? new Promise(resolve => { reply = resolve; }) : original(message);
   const starting = h.start();
   await h.settle();
@@ -699,8 +699,23 @@ test("every scanner request carries the live URL, including SPA and hash changes
       assert.ok(requests.some(message => message.type === type), type);
     }
     assert.ok(requests.every(message => message.page_url === url
-      && message.scanner_version === 7 && message.protocol_version === 3));
+      && message.scanner_version === 8 && message.protocol_version === 3));
   }
+});
+
+test("requests carry this document's token and messages bound to another document are ignored", async () => {
+  const h = await harness({ auto: true });
+  await h.finish();
+  const token = h.context.__deckardDocumentToken;
+  assert.match(token, /^id-\d+$/);
+  assert.ok(h.requests.length > 0 && h.requests.every(message => message.document_token === token));
+  let replied = false;
+  assert.equal(h.listeners[0]({ type: "PAGE_STATUS", documentToken: "another-document" }, { id: "test-id" },
+    () => { replied = true; }), false);
+  assert.equal(replied, false);
+  const status = await new Promise(resolve =>
+    h.listeners[0]({ type: "PAGE_STATUS", documentToken: token }, { id: "test-id" }, resolve));
+  assert.equal(typeof status.state, "string");
 });
 
 test("history changes restart exhausted pages without requiring DOM mutations", async () => {
@@ -784,8 +799,8 @@ test("continuously mutating feeds cannot postpone a scheduled scan forever", asy
 test("mutations cannot start analysis before the new run is authorized", async () => {
   const h = await harness();
   let reply;
-  const original = h.context.chrome.runtime.sendMessage;
-  h.context.chrome.runtime.sendMessage = message => message.type === "BEGIN_SCAN"
+  const original = h.context.browser.runtime.sendMessage;
+  h.context.browser.runtime.sendMessage = message => message.type === "BEGIN_SCAN"
     ? new Promise(resolve => { reply = resolve; }) : original(message);
   const starting = h.start();
   await h.settle();
@@ -863,7 +878,7 @@ test("the scanner continues top-to-bottom beyond twelve passages and publishes t
   assert.equal(updates[0].status.state, "scanning");
   assert.equal(updates.at(-1).status.state, "done");
   assert.equal(updates.at(-1).status.marked, 20);
-  assert.ok(updates.every(message => message.scanner_version === 7));
+  assert.ok(updates.every(message => message.scanner_version === 8));
   assert.ok(!JSON.stringify(updates).includes(h.blocks[0].text));
 });
 
@@ -958,13 +973,13 @@ test("late configuration responses cannot undo a newer threshold", async () => {
   const h = await harness();
   await h.start();
   await h.finish(0, { ...result, score: 0.85, min_score: 0.85, max_score: 0.85 });
-  const original = h.context.chrome.runtime.sendMessage;
+  const original = h.context.browser.runtime.sendMessage;
   let release;
-  h.context.chrome.runtime.sendMessage = message => message.type === "GET_CONFIG"
+  h.context.browser.runtime.sendMessage = message => message.type === "GET_CONFIG"
     ? new Promise(resolve => { release = resolve; }) : original(message);
   const old = h.send({ type: "SETTINGS_CHANGED" });
   await h.settle();
-  h.context.chrome.runtime.sendMessage = original;
+  h.context.browser.runtime.sendMessage = original;
   h.settings.flagThreshold = 0.9;
   await h.send({ type: "SETTINGS_CHANGED" });
   release({ ok: true, result: { enabled: true, flagThreshold: 0.7 } });

@@ -11,10 +11,10 @@ for legacy in "$BUILD_DIR/dist/lib/libmlx.dylib" "$BUILD_DIR/dist/lib/mlx.metall
     exit 1
   fi
 done
-/usr/sbin/taskpolicy -b bash "$ROOT/native-cli/bootstrap.sh"
-/usr/sbin/taskpolicy -b cmake -S "$ROOT/native-cli" -B "$BUILD_DIR" \
+nice -n 10 sh "$ROOT/native-cli/bootstrap.sh"
+nice -n 10 cmake -S "$ROOT/native-cli" -B "$BUILD_DIR" \
   -DCMAKE_BUILD_TYPE=Release -DNATIVE_CACHE="$NATIVE_CACHE" \
   -DCMAKE_INSTALL_PREFIX="$BUILD_DIR/dist"
-/usr/sbin/taskpolicy -b cmake --build "$BUILD_DIR" --parallel 2
-/usr/sbin/taskpolicy -b cmake --install "$BUILD_DIR"
+nice -n 10 cmake --build "$BUILD_DIR" --parallel "$(nproc)"
+nice -n 10 cmake --install "$BUILD_DIR"
 printf 'Built native distribution: %s/dist\n' "$BUILD_DIR"

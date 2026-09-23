@@ -4,9 +4,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { createHash } from "node:crypto";
 import { archiveSizeLimit, modelFiles } from "../scripts/release-assets.mjs";
-import { canonicalJson } from "../native-cli/tests/model-fixture.mjs";
 
 const root = fileURLToPath(new URL("../", import.meta.url));
 const release = process.env.DECKARD_RELEASE_DIR;
@@ -23,8 +21,9 @@ test("real release archive installs, upgrades, uninstalls and reinstalls through
     const profile = path.join(user, ".zshrc");
     const original = "# unrelated settings\nexport PERSONAL_TEST_SETTING=preserved";
     fs.writeFileSync(profile, original);
-    const archiveName = "deckard-v0.6.4-macos-arm64.tar.gz";
-    const appArchiveName = "deckard-v0.6.4-macos-arm64-app.tar.gz";
+    const arch = { x64: "x86_64", arm64: "aarch64" }[process.arch];
+    const archiveName = `deckard-v0.7.0-linux-${arch}.tar.gz`;
+    const appArchiveName = `deckard-v0.7.0-linux-${arch}-app.tar.gz`;
     const archive = path.resolve(release, archiveName);
     const appArchive = path.resolve(release, appArchiveName);
     assert.ok(fs.statSync(archive).size < archiveSizeLimit);
@@ -36,11 +35,12 @@ test("real release archive installs, upgrades, uninstalls and reinstalls through
     const entries = new Set(listing.stdout.trim().split("\n"));
     for (const name of modelFiles) assert.ok(entries.has(`models/${name}`), `Missing packaged asset: ${name}`);
     assert.ok(entries.has("share/licenses/model-assets.json"));
-    assert.doesNotMatch(listing.stdout, /packed\.safetensors|libmlx\.dylib|mlx\.metallib|MLX-LICENSE/);
+    assert.ok(entries.has("lib/libonnxruntime.so.1"));
+    assert.doesNotMatch(listing.stdout, /packed\.safetensors|mlpackage|libmlx\.dylib|mlx\.metallib|MLX-LICENSE/);
     const appListing = spawnSync("/usr/bin/tar", ["-tzf", appArchive], { encoding: "utf8", timeout: 120000 });
     assert.equal(appListing.status, 0, appListing.stderr);
     assert.doesNotMatch(appListing.stdout, /^models(?:\/|$)/m);
-    for (const name of ["bin/deckard", "extension/popup.html", "share/licenses/model-assets.json"]) {
+    for (const name of ["bin/deckard", "lib/libonnxruntime.so.1", "extension/popup.html", "share/licenses/model-assets.json"]) {
       assert.ok(appListing.stdout.split("\n").includes(name));
     }
     const script = fs.readFileSync(path.join(release, "install.sh"), "utf8");
@@ -59,8 +59,8 @@ done
 [ -n "$output" ]
 printf '%s\\n' "$url" >> "$CURL_LOG"
 case "$url" in
-  "https://github.com/sgoedecke/deckard/releases/download/v0.6.4/${archiveName}") cp "$RELEASE_ARCHIVE" "$output" ;;
-  "https://github.com/sgoedecke/deckard/releases/download/v0.6.4/${appArchiveName}") cp "$APP_ARCHIVE" "$output" ;;
+  "https://github.com/thekysek/deckard/releases/download/v0.7.0/${archiveName}") cp "$RELEASE_ARCHIVE" "$output" ;;
+  "https://github.com/thekysek/deckard/releases/download/v0.7.0/${appArchiveName}") cp "$APP_ARCHIVE" "$output" ;;
   *) exit 1 ;;
 esac
 if [ -n "\${MUTATE_MODEL:-}" ]; then printf 'changed during download' > "$MUTATE_MODEL"; fi
@@ -71,7 +71,7 @@ if [ -n "\${MUTATE_MODEL:-}" ]; then printf 'changed during download' > "$MUTATE
     const run = (command, args, input) => spawnSync(command, args, {
       cwd: scratch, env, input, encoding: "utf8", timeout: 300000, maxBuffer: 1024 * 1024,
     });
-    const hashes = spawnSync("/usr/bin/shasum", ["-a", "256", "-c", "SHA256SUMS"], {
+    const hashes = spawnSync("sha256sum", ["-c", "SHA256SUMS"], {
       cwd: release, encoding: "utf8", timeout: 120000,
     });
     assert.equal(hashes.status, 0, hashes.stderr);
@@ -83,23 +83,22 @@ if [ -n "\${MUTATE_MODEL:-}" ]; then printf 'changed during download' > "$MUTATE
     const install = () => run("/bin/bash", ["-s", "--", "--yes", "--no-open", "--shell", "zsh"], script);
     const prefix = path.join(user, "Deckard");
     const binary = path.join(prefix, "current/bin/deckard");
-    const registration = path.join(user, "Library/Application Support/Google/Chrome/NativeMessagingHosts/com.sgoedecke.deckard.json");
+    const registration = path.join(user, ".mozilla/native-messaging-hosts/com.sgoedecke.deckard.json");
     let result = install();
     assert.equal(result.status, 0, result.stderr);
-    assert.match(result.stdout, /chrome:\/\/extensions/);
-    assert.match(result.stdout, /Load unpacked/);
+    assert.match(result.stdout, /about:debugging/);
+    assert.match(result.stdout, /Load Temporary Add-on/);
     const firstProfile = fs.readFileSync(profile, "utf8");
     const extension = JSON.parse(fs.readFileSync(path.join(prefix, "extension/manifest.json")));
     assert.equal(extension.name, "Deckard");
-    assert.equal(extension.version, "0.6.4");
+    assert.equal(extension.version, "0.7.0");
     for (const name of ["core.js", "content.js", "service-worker.js", "popup.html", "popup.js", "popup.css"]) {
       assert.equal(fs.readFileSync(path.join(prefix, "extension", name), "utf8"),
         fs.readFileSync(path.join(root, "extension", name), "utf8"), `Installed extension file is stale: ${name}`);
     }
     assert.deepEqual(JSON.parse(fs.readFileSync(path.join(prefix, "current/share/licenses/model-assets.json"))),
       JSON.parse(fs.readFileSync(path.join(root, "native-cli/model-assets.json"))));
-    assert.deepEqual(JSON.parse(fs.readFileSync(registration)).allowed_origins,
-      ["chrome-extension://bkihjdkalohbkgnjjoobababhipefjdg/"]);
+    assert.deepEqual(JSON.parse(fs.readFileSync(registration)).allowed_extensions, ["deckard@thekysek.github.io"]);
     const status = run(binary, ["status"]);
     assert.equal(status.status, 0, status.stderr);
     assert.equal(JSON.parse(status.stdout).installation.product, "Deckard");
@@ -108,19 +107,12 @@ if [ -n "\${MUTATE_MODEL:-}" ]; then printf 'changed during download' > "$MUTATE
         binary, path.resolve(process.env.DECKARD_SMOKE_RECEIPT)]);
       assert.equal(smoke.status, 0, smoke.stderr);
     }
-    // Exercise a real upgrade from older Core ML ownership metadata, not just a same-version reinstall.
-    const previous = fs.realpathSync(path.join(prefix, "current"));
-    const previousConfig = { ...JSON.parse(fs.readFileSync(path.join(previous, "install.json"))), version: "0.6.0" };
-    const metadata = canonicalJson(previousConfig);
-    const previousName = `0.6.0-${createHash("sha256").update(metadata).digest("hex").slice(0, 20)}`;
-    fs.writeFileSync(path.join(previous, "install.json"), metadata);
-    fs.renameSync(previous, path.join(prefix, "releases", previousName));
-    fs.unlinkSync(path.join(prefix, "current"));
-    fs.symlinkSync(`releases/${previousName}`, path.join(prefix, "current"));
+    // A reinstall reuses the installed model through the app-only archive.
+    const previous = fs.readlinkSync(path.join(prefix, "current"));
     result = install();
     assert.equal(result.status, 0, result.stderr);
     assert.match(result.stdout, /Installed model checksums match/);
-    assert.notEqual(fs.readlinkSync(path.join(prefix, "current")), `releases/${previousName}`);
+    assert.equal(fs.readlinkSync(path.join(prefix, "current")), previous);
     assert.equal(fs.readFileSync(profile, "utf8"), firstProfile);
     const current = fs.readlinkSync(path.join(prefix, "current"));
     const tokenizer = path.join(prefix, current, "models/tokenizer.json");

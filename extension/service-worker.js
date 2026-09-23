@@ -2,7 +2,7 @@ import "./core.js";
 import { NativeQueue, NativeError } from "./native-queue.js";
 
 const C = globalThis.DeckardCore;
-const broker = new NativeQueue(() => chrome.runtime.connectNative("com.sgoedecke.deckard"));
+const broker = new NativeQueue(() => browser.runtime.connectNative("com.sgoedecke.deckard"));
 const runs = new Map();
 const tabGenerations = new Map();
 const badgeJobs = new Map();
@@ -25,13 +25,12 @@ function safeTab(tab) {
 }
 function siteExcluded(url) { return excludedSites.has(C.hostnameOf(url)); }
 function siteVersion(url) { return siteVersions.get(C.hostnameOf(url)) || 0; }
-function contentSender(sender) {
-  return sender.id === chrome.runtime.id && sender.tab && !sender.tab.incognito
-    && sender.frameId === 0 && validRun(sender.documentId)
-    && (!sender.documentLifecycle || sender.documentLifecycle === "active") && C.originOf(sender.url);
+function contentSender(sender, message) {
+  return sender.id === browser.runtime.id && sender.tab && !sender.tab.incognito
+    && sender.frameId === 0 && validRun(message.document_token) && C.originOf(sender.url);
 }
 function popupSender(sender) {
-  return sender.id === chrome.runtime.id && !sender.tab && sender.url === chrome.runtime.getURL("popup.html");
+  return sender.id === browser.runtime.id && !sender.tab && sender.url === browser.runtime.getURL("popup.html");
 }
 function validRun(value) { return typeof value === "string" && /^[a-zA-Z0-9-]{1,100}$/.test(value); }
 function validFinding(value) {
@@ -82,7 +81,7 @@ function updateBadge(tabId, status = null) {
   const version = (badgeVersions.get(tabId) || 0) + 1;
   badgeVersions.set(tabId, version);
   const appearance = badge(status);
-  // Serialize writes: even a Chrome call already in flight is followed by the
+  // Serialize writes: even a browser call already in flight is followed by the
   // newest clear/update, and superseded queued writes never run.
   const job = (badgeJobs.get(tabId) || Promise.resolve()).catch(() => {}).then(async () => {
     for (const [method, fields] of [
@@ -91,7 +90,7 @@ function updateBadge(tabId, status = null) {
       ["setTitle", { title: appearance.title }],
     ]) {
       if (badgeVersions.get(tabId) !== version) return;
-      await chrome.action[method]({ tabId, ...fields });
+      await browser.action[method]({ tabId, ...fields });
     }
   }).catch(error => {
     if (!/No tab with id|tab was closed/i.test(error?.message || "")) console.error("Deckard: badge_update_failed");
@@ -104,9 +103,11 @@ function updateBadge(tabId, status = null) {
     }
   });
 }
-function hasPermission() { return chrome.permissions.contains({ origins: C.HOST_PERMISSIONS }); }
-async function sendToTab(tabId, message, documentId) {
-  try { return await chrome.tabs.sendMessage(tabId, message, documentId ? { documentId } : { frameId: 0 }); } catch { return null; }
+function hasPermission() { return browser.permissions.contains({ origins: C.HOST_PERMISSIONS }); }
+async function sendToTab(tabId, message, documentToken) {
+  // The content script drops messages bound to another document's token.
+  const bound = documentToken ? { ...message, documentToken } : message;
+  try { return await browser.tabs.sendMessage(tabId, bound, { frameId: 0 }); } catch { return null; }
 }
 function cancelTab(tabId) {
   tabGenerations.set(tabId, ++tabSequence);
@@ -115,7 +116,7 @@ function cancelTab(tabId) {
   broker.cancel(owner => owner.tabId === tabId);
 }
 function saveSettings(value) {
-  persistence = persistence.catch(() => {}).then(() => chrome.storage.local.set({ deckardSettings: { enabled: value } }));
+  persistence = persistence.catch(() => {}).then(() => browser.storage.local.set({ deckardSettings: { enabled: value } }));
   return persistence;
 }
 function disable() {
@@ -126,10 +127,10 @@ function disable() {
   broker.disconnect();
 }
 async function restoreTabs(generation = revision) {
-  const tabs = await chrome.tabs.query({});
+  const tabs = await browser.tabs.query({});
   if (enabled || generation !== revision) return;
   await Promise.all(tabs.map(tab => {
-    // Even after permission revocation Chrome still exposes tab IDs, but not URLs.
+    // Even after permission revocation the browser still exposes tab IDs, but not URLs.
     if (Number.isInteger(tab.id) && !tab.incognito) {
       updateBadge(tab.id);
       return sendToTab(tab.id, { type: "STOP" });
@@ -150,29 +151,29 @@ async function activateTab(tab, generation = revision) {
   const version = siteVersion(tab.url);
   if (!runs.has(tab.id)) updateBadge(tab.id);
   try {
-    await chrome.scripting.executeScript({ target: { tabId: tab.id, frameIds: [0] }, files: ["core.js", "content.js"] });
+    await browser.scripting.executeScript({ target: { tabId: tab.id, frameIds: [0] }, files: ["core.js", "content.js"] });
     if (enabled && generation === revision && tabGeneration === tabGenerations.get(tab.id)
       && version === siteVersion(tab.url) && !siteExcluded(tab.url)) {
       await sendToTab(tab.id, { type: "START" });
     }
-  } catch { /* Restricted pages (including the Chrome Web Store) cannot be injected. */ }
+  } catch { /* Restricted pages (including addons.mozilla.org) cannot be injected. */ }
 }
 async function synchronize() {
   const generation = revision;
   const active = enabled;
-  const existing = (await chrome.scripting.getRegisteredContentScripts())
+  const existing = (await browser.scripting.getRegisteredContentScripts())
     .filter(script => script.id === SCRIPT_ID || script.id.startsWith("deckard-site-"));
   if (generation !== revision) return;
-  if (existing.length) await chrome.scripting.unregisterContentScripts({ ids: existing.map(script => script.id) });
+  if (existing.length) await browser.scripting.unregisterContentScripts({ ids: existing.map(script => script.id) });
   if (generation !== revision) return;
   if (active) {
-    await chrome.scripting.registerContentScripts([{
+    await browser.scripting.registerContentScripts([{
       id: SCRIPT_ID, matches: C.HOST_PERMISSIONS, js: ["core.js", "content.js"],
       runAt: "document_idle", allFrames: false, persistAcrossSessions: true,
     }]);
     if (generation !== revision) return;
     // One slow/loading tab must not block activation of others or a later Off.
-    for (const tab of await chrome.tabs.query({})) void activateTab(tab, generation);
+    for (const tab of await browser.tabs.query({})) void activateTab(tab, generation);
   } else {
     await restoreTabs();
   }
@@ -183,7 +184,7 @@ function scheduleSync() {
 }
 const ready = (async () => {
   const generation = revision;
-  const stored = await chrome.storage.local.get(["deckardSettings", "deckardFlagThreshold", "deckardExcludedSites"]);
+  const stored = await browser.storage.local.get(["deckardSettings", "deckardFlagThreshold", "deckardExcludedSites"]);
   const config = C.normalizeSettings({
     ...stored.deckardSettings,
     enabled: stored.deckardSettings?.enabled === undefined ? true : stored.deckardSettings.enabled,
@@ -194,7 +195,7 @@ const ready = (async () => {
   const allowed = config.enabled && await hasPermission();
   if (generation !== revision) return;
   enabled = Boolean(allowed);
-  // Only a missing preference defaults On, and only with Chrome's host grants.
+  // Only a missing preference defaults On, and only with Firefox's host grants.
   // Persist Deckard's state without touching unrelated legacy settings.
   await saveSettings(enabled);
 })().catch(error => { disable(); console.error(error); });
@@ -237,26 +238,26 @@ async function handlePopup(message) {
         throw new NativeError("invalid_request", "Invalid site preference.");
       }
       persistence = persistence.catch(() => {}).then(async () => {
-        const tab = await chrome.tabs.get(message.tabId);
+        const tab = await browser.tabs.get(message.tabId);
         if (!safeTab(tab) || C.hostnameOf(tab.url) !== message.hostname) {
           throw new NativeError("invalid_request", "This page has changed or is unavailable. Reopen the popup.");
         }
         const next = new Set(excludedSites);
         if (message.excluded) next.add(message.hostname);
         else next.delete(message.hostname);
-        await chrome.storage.local.set({ deckardExcludedSites: [...next] });
+        await browser.storage.local.set({ deckardExcludedSites: [...next] });
         excludedSites = next;
         siteVersions.set(message.hostname, siteVersion(tab.url) + 1);
         for (const [tabId, run] of runs) {
           if (siteExcluded(run.url)) {
             cancelTab(tabId);
-            void sendToTab(tabId, { type: "SETTINGS_CHANGED" }, run.documentId);
+            void sendToTab(tabId, { type: "SETTINGS_CHANGED" }, run.documentToken);
           }
         }
       });
       await persistence;
       // Re-read the latest preference in each document; slow tabs must not block saving.
-      for (const tab of await chrome.tabs.query({})) {
+      for (const tab of await browser.tabs.query({})) {
         if (!safeTab(tab) || C.hostnameOf(tab.url) !== message.hostname) continue;
         if (siteExcluded(tab.url)) {
           void sendToTab(tab.id, { type: "SETTINGS_CHANGED" });
@@ -270,12 +271,12 @@ async function handlePopup(message) {
       if (!C.validThreshold(message.flagThreshold)) throw new NativeError("invalid_request", "Threshold must be between 70 and 99.");
       const value = message.flagThreshold;
       persistence = persistence.catch(() => {}).then(async () => {
-        await chrome.storage.local.set({ deckardFlagThreshold: value });
+        await browser.storage.local.set({ deckardFlagThreshold: value });
         flagThreshold = value;
       });
       await persistence;
       if (enabled) {
-        for (const [tabId, run] of runs) void sendToTab(tabId, { type: "SETTINGS_CHANGED" }, run.documentId);
+        for (const [tabId, run] of runs) void sendToTab(tabId, { type: "SETTINGS_CHANGED" }, run.documentToken);
       }
       return { enabled, flagThreshold };
     }
@@ -283,7 +284,7 @@ async function handlePopup(message) {
       if (!enabled) return { state: "off", detail: "Off. Page content is restored; no new analysis runs." };
       if (!Number.isInteger(message.tabId)) return { state: "unsupported", detail: "This page cannot be scanned. Normal HTTP(S) pages only." };
       const generation = revision;
-      const tab = await chrome.tabs.get(message.tabId);
+      const tab = await browser.tabs.get(message.tabId);
       if (!safeTab(tab)) return { state: "unsupported", detail: "This page cannot be scanned. Normal non-private HTTP(S) pages only." };
       if (!enabled || generation !== revision) return { state: "off", detail: "Off." };
       if (siteExcluded(tab.url)) return { state: "excluded", detail: "Do not flag is on for this site. No analysis runs." };
@@ -295,7 +296,7 @@ async function handlePopup(message) {
       if (!run) return { state: "unsupported", detail: "This page is loading or does not allow extension access." };
       (await authorizeRun(tab.id, run))();
       const previous = run.status;
-      const response = await sendToTab(tab.id, { type: "PAGE_STATUS", runId: run.runId }, run.documentId);
+      const response = await sendToTab(tab.id, { type: "PAGE_STATUS", runId: run.runId }, run.documentToken);
       (await authorizeRun(tab.id, run))();
       if (response && run.status === previous && (response.sequence || 0) >= run.status.sequence) {
         run.status = sanitizeStatus(response);
@@ -311,31 +312,32 @@ async function handlePopup(message) {
       (await authorizeRun(message.tabId, run))();
       if (!run.status?.findings.some(finding => finding.id === message.findingId)) return { focused: false };
       const response = await sendToTab(message.tabId,
-        { type: "FOCUS_FINDING", findingId: message.findingId, runId: run.runId }, run.documentId);
+        { type: "FOCUS_FINDING", findingId: message.findingId, runId: run.runId }, run.documentToken);
       (await authorizeRun(message.tabId, run))();
       return { focused: response?.focused === true };
     }
     default: throw new NativeError("invalid_request", "Unknown popup request.");
   }
 }
-async function authorizePage(tabId, documentId, url) {
-  const tab = await chrome.tabs.get(tabId);
+async function authorizePage(tabId, documentToken, url) {
+  const tab = await browser.tabs.get(tabId);
   if (!safeTab(tab) || tab.url !== url) throw new NativeError("cancelled", "This page has changed.");
   // MessageSender.url is the original document URL even after pushState.
-  // Probe Chrome's current top frame, not a possibly cached sender document.
-  const results = await chrome.scripting.executeScript({
+  // Probe the current top frame; the token identifies the live content-script document.
+  const results = await browser.scripting.executeScript({
     target: { tabId, frameIds: [0] }, world: "ISOLATED",
-    func: () => location.href,
+    func: () => [location.href, globalThis.__deckardDocumentToken],
   });
-  const live = await chrome.tabs.get(tabId);
-  if (results.length !== 1 || results[0].frameId !== 0 || results[0].documentId !== documentId
-    || results[0].result !== url || !safeTab(live) || live.url !== url) {
+  const live = await browser.tabs.get(tabId);
+  const [href, token] = Array.isArray(results?.[0]?.result) ? results[0].result : [];
+  if (results.length !== 1 || results[0].frameId !== 0 || token !== documentToken
+    || href !== url || !safeTab(live) || live.url !== url) {
     throw new NativeError("cancelled", "This page has changed.");
   }
 }
 async function authorizeRun(tabId, run, sender, message) {
   const current = () => enabled && run && !siteExcluded(run.url) && runs.get(tabId) === run
-    && (!sender || (run.runId === message.runId && run.documentId === sender.documentId
+    && (!sender || (run.runId === message.runId && run.documentToken === message.document_token
       && run.url === message.page_url));
   if (!current()) throw new NativeError("cancelled", "Scan is no longer current.");
   const generation = revision;
@@ -343,7 +345,7 @@ async function authorizeRun(tabId, run, sender, message) {
   if (!allowed || generation !== revision || !current()) {
     throw new NativeError("cancelled", "Scan is no longer current.");
   }
-  await authorizePage(tabId, run.documentId, run.url);
+  await authorizePage(tabId, run.documentToken, run.url);
   // The caller resumes in another microtask; recheck before it commits metadata
   // or routes a request so Off/navigation cannot slip between authorization and use.
   return () => {
@@ -369,7 +371,7 @@ async function handleContent(message, sender) {
       const version = siteVersion(message.page_url);
       if (enabled && !siteExcluded(message.page_url)) {
         if (!(await hasPermission())) throw new NativeError("cancelled", "Page access was revoked.");
-        await authorizePage(tabId, sender.documentId, message.page_url);
+        await authorizePage(tabId, message.document_token, message.page_url);
         if (generation !== revision || tabGeneration !== tabGenerations.get(tabId)
           || version !== siteVersion(message.page_url)) {
           throw new NativeError("cancelled", "This page has changed.");
@@ -383,7 +385,7 @@ async function handleContent(message, sender) {
       const tabGeneration = tabGenerations.get(tabId);
       const version = siteVersion(message.page_url);
       const allowed = enabled && !siteExcluded(message.page_url) && await hasPermission();
-      if (allowed) await authorizePage(tabId, sender.documentId, message.page_url);
+      if (allowed) await authorizePage(tabId, message.document_token, message.page_url);
       if (!allowed || !enabled || siteExcluded(message.page_url) || version !== siteVersion(message.page_url)
         || generation !== revision || tabGeneration !== tabGenerations.get(tabId)) {
         throw new NativeError("cancelled", "Scanning is off or this page has changed.");
@@ -391,7 +393,7 @@ async function handleContent(message, sender) {
       // A stale BEGIN must not cancel the current document's run.
       cancelTab(tabId);
       const status = sanitizeStatus({ state: "starting" });
-      runs.set(tabId, { runId: message.runId, documentId: sender.documentId, url: message.page_url, status });
+      runs.set(tabId, { runId: message.runId, documentToken: message.document_token, url: message.page_url, status });
       updateBadge(tabId, status);
       return { started: true };
     }
@@ -427,9 +429,9 @@ async function handleContent(message, sender) {
   }
 }
 
-chrome.runtime.onMessage.addListener((message, sender, respond) => {
+browser.runtime.onMessage.addListener((message, sender, respond) => {
   if (!message || typeof message !== "object" || typeof message.type !== "string"
-    || (!popupSender(sender) && !contentSender(sender))) {
+    || (!popupSender(sender) && !contentSender(sender, message))) {
     respond({ ok: false, error: { code: "invalid_sender", message: "Unsupported request." } });
     return false;
   }
@@ -439,11 +441,11 @@ chrome.runtime.onMessage.addListener((message, sender, respond) => {
     }));
   return true;
 });
-chrome.tabs.onRemoved.addListener(tabId => {
+browser.tabs.onRemoved.addListener(tabId => {
   cancelTab(tabId);
   tabGenerations.delete(tabId);
 });
-chrome.tabs.onUpdated.addListener((tabId, changes, tab) => {
+browser.tabs.onUpdated.addListener((tabId, changes, tab) => {
   if (changes.status === "loading" || changes.url) {
     const run = runs.get(tabId);
     // The content script can observe pushState before this event arrives.
@@ -457,9 +459,9 @@ chrome.tabs.onUpdated.addListener((tabId, changes, tab) => {
   if (changes.status === "complete") void ready.then(() => activateTab(tab)).catch(console.error);
 });
 function reconcile() { void ready.then(scheduleSync).catch(console.error); }
-chrome.runtime.onInstalled.addListener(reconcile);
-chrome.runtime.onStartup.addListener(reconcile);
-chrome.permissions.onRemoved.addListener(() => {
+browser.runtime.onInstalled.addListener(reconcile);
+browser.runtime.onStartup.addListener(reconcile);
+browser.permissions.onRemoved.addListener(() => {
   // Fail closed immediately, including pending authorizations and native replies.
   disable();
   void Promise.all([saveSettings(false), restoreTabs(), scheduleSync()]).catch(console.error);

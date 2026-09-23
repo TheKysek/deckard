@@ -25,7 +25,7 @@ test('production build refuses stale MLX artifacts without changing existing out
   }
 });
 
-test('production bootstrap accepts a read-only Rust/JSON cache without MLX; research SDK is opt-in', async t => {
+test('production bootstrap accepts a complete read-only cache without downloading', async t => {
   const directory = await fs.mkdtemp(path.join(root, 'tests/.native-bootstrap-'));
   t.after(() => fs.rm(directory, { recursive: true, force: true }));
   const commands = path.join(directory, 'commands');
@@ -34,7 +34,8 @@ test('production bootstrap accepts a read-only Rust/JSON cache without MLX; rese
   const files = [
     'json/include/nlohmann/json.hpp',
     'cargo/registry/fixture',
-    'rustup/toolchains/1.90.0-aarch64-apple-darwin/bin/cargo',
+    'rustup/toolchains/1.90.0-x86_64-unknown-linux-gnu/bin/cargo',
+    'onnxruntime/onnxruntime-linux-x64-1.22.0/lib/libonnxruntime.so.1.22.0',
     'licenses/NLOHMANN-LICENSE',
   ];
   for (const name of files) {
@@ -42,30 +43,28 @@ test('production bootstrap accepts a read-only Rust/JSON cache without MLX; rese
     await fs.writeFile(path.join(cache, name), 'fixture');
   }
   for (const [name, content] of Object.entries({
-    uname: 'case "$1" in -s) echo Darwin;; -m) echo arm64;; esac',
-    sw_vers: 'echo 15.0',
+    uname: 'case "$1" in -s) echo "${MOCK_OS:-Linux}";; -m) echo x86_64;; esac',
     cmake: 'exit 0',
-    xcrun: 'exit 0',
+    'c++': 'exit 0',
     curl: 'echo "Unexpected download" >&2; exit 99',
   })) await fs.writeFile(path.join(commands, name), `#!/bin/sh\n${content}\n`, { mode: 0o755 });
   const before = await fs.readdir(cache, { recursive: true });
-  const run = mlx => spawnSync('/bin/sh', [path.join(root, 'native-cli/bootstrap.sh')], {
-    cwd: directory, encoding: 'utf8', env: {
-      ...process.env, PATH: `${commands}:/usr/bin:/bin`, NATIVE_CACHE: cache, DECKARD_BOOTSTRAP_MLX: mlx,
-    },
+  const run = (env = {}) => spawnSync('/bin/sh', [path.join(root, 'native-cli/bootstrap.sh')], {
+    cwd: directory, encoding: 'utf8', env: { ...process.env, PATH: `${commands}:/usr/bin:/bin`, NATIVE_CACHE: cache, ...env },
   });
-  let result = run('0');
+  let result = run();
   assert.equal(result.status, 0, result.stderr);
   assert.match(result.stdout, /read-only native dependencies/);
   assert.deepEqual(await fs.readdir(cache, { recursive: true }), before);
-  result = run('1');
+  result = run({ MOCK_OS: 'Darwin' });
   assert.notEqual(result.status, 0);
-  assert.match(result.stderr, /incomplete: mlx-sdk/);
-  result = run('invalid');
-  assert.notEqual(result.status, 0);
-  assert.match(result.stderr, /must be 0 or 1/);
-  await fs.rm(path.join(cache, 'licenses/NLOHMANN-LICENSE'));
-  result = run('0');
-  assert.notEqual(result.status, 0);
-  assert.match(result.stderr, /incomplete: licenses\/NLOHMANN-LICENSE/);
+  assert.match(result.stderr, /requires Linux/);
+  for (const missing of ['licenses/NLOHMANN-LICENSE', 'onnxruntime/onnxruntime-linux-x64-1.22.0/lib/libonnxruntime.so.1.22.0']) {
+    const saved = await fs.readFile(path.join(cache, missing));
+    await fs.rm(path.join(cache, missing));
+    result = run();
+    assert.notEqual(result.status, 0);
+    assert.ok(result.stderr.includes(`incomplete: ${missing}`), result.stderr);
+    await fs.writeFile(path.join(cache, missing), saved);
+  }
 });

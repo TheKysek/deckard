@@ -1,12 +1,11 @@
 #include "support.hpp"
 #include "model_assets.hpp"
-#include <CommonCrypto/CommonDigest.h>
-#include <curl/curl.h>
-#include <mach-o/dyld.h>
 #include <sys/resource.h>
-#include <pthread.h>
 #include <unistd.h>
 #include <array>
+#include <algorithm>
+#include <cstdint>
+#include <cstring>
 #include <cerrno>
 #include <chrono>
 #include <cmath>
@@ -14,6 +13,7 @@
 #include <fstream>
 #include <iomanip>
 #include <iostream>
+#include <regex>
 #include <sstream>
 #include <set>
 
@@ -54,29 +54,75 @@ bool whitespace(uint32_t cp) {
         cp == 0xa0 || cp == 0x1680 || (cp >= 0x2000 && cp <= 0x200a) ||
         cp == 0x2028 || cp == 0x2029 || cp == 0x202f || cp == 0x205f || cp == 0x3000;
 }
-struct Download {
-    std::ofstream stream;
-    uint64_t bytes = 0;
-    uint64_t maximum;
+// FIPS 180-4 SHA-256; small enough to avoid a crypto library dependency.
+class Sha256 {
+public:
+    void update(const unsigned char* data, size_t size) {
+        length_ += static_cast<uint64_t>(size) * 8;
+        while (size) {
+            size_t take = std::min(size, block_.size() - used_);
+            std::memcpy(block_.data() + used_, data, take);
+            used_ += take; data += take; size -= take;
+            if (used_ == block_.size()) { compress(); used_ = 0; }
+        }
+    }
+    std::string finish() {
+        const uint64_t bits = length_;
+        const unsigned char pad = 0x80, zero = 0;
+        update(&pad, 1);
+        while (used_ != 56) update(&zero, 1);
+        unsigned char tail[8];
+        for (int i = 0; i < 8; ++i) tail[i] = static_cast<unsigned char>(bits >> (56 - 8 * i));
+        update(tail, 8);
+        unsigned char digest[32];
+        for (int i = 0; i < 8; ++i)
+            for (int j = 0; j < 4; ++j) digest[4 * i + j] = static_cast<unsigned char>(state_[i] >> (24 - 8 * j));
+        return hex(digest, sizeof(digest));
+    }
+private:
+    static uint32_t rotate(uint32_t value, int count) { return (value >> count) | (value << (32 - count)); }
+    void compress() {
+        static constexpr uint32_t k[64] = {
+            0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
+            0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
+            0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+            0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
+            0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
+            0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+            0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+            0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2};
+        uint32_t w[64];
+        for (int i = 0; i < 16; ++i)
+            w[i] = uint32_t(block_[4 * i]) << 24 | uint32_t(block_[4 * i + 1]) << 16 |
+                   uint32_t(block_[4 * i + 2]) << 8 | uint32_t(block_[4 * i + 3]);
+        for (int i = 16; i < 64; ++i) {
+            uint32_t s0 = rotate(w[i - 15], 7) ^ rotate(w[i - 15], 18) ^ (w[i - 15] >> 3);
+            uint32_t s1 = rotate(w[i - 2], 17) ^ rotate(w[i - 2], 19) ^ (w[i - 2] >> 10);
+            w[i] = w[i - 16] + s0 + w[i - 7] + s1;
+        }
+        uint32_t a = state_[0], b = state_[1], c = state_[2], d = state_[3],
+                 e = state_[4], f = state_[5], g = state_[6], h = state_[7];
+        for (int i = 0; i < 64; ++i) {
+            uint32_t t1 = h + (rotate(e, 6) ^ rotate(e, 11) ^ rotate(e, 25)) + ((e & f) ^ (~e & g)) + k[i] + w[i];
+            uint32_t t2 = (rotate(a, 2) ^ rotate(a, 13) ^ rotate(a, 22)) + ((a & b) ^ (a & c) ^ (b & c));
+            h = g; g = f; f = e; e = d + t1; d = c; c = b; b = a; a = t1 + t2;
+        }
+        state_[0] += a; state_[1] += b; state_[2] += c; state_[3] += d;
+        state_[4] += e; state_[5] += f; state_[6] += g; state_[7] += h;
+    }
+    std::array<uint32_t, 8> state_{0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a,
+                                   0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19};
+    std::array<unsigned char, 64> block_{};
+    size_t used_ = 0;
+    uint64_t length_ = 0;
 };
-size_t receive(char* data, size_t size, size_t count, void* pointer) {
-    auto& state = *static_cast<Download*>(pointer);
-    if (size && count > SIZE_MAX / size) return 0;
-    size_t length = size * count;
-    if (length > state.maximum - state.bytes) return 0;
-    state.stream.write(data, static_cast<std::streamsize>(length));
-    if (!state.stream) return 0;
-    state.bytes += length;
-    return length;
-}
 }
 
 fs::path executable_path() {
-    uint32_t size = 0;
-    _NSGetExecutablePath(nullptr, &size);
-    std::vector<char> buffer(size);
-    if (_NSGetExecutablePath(buffer.data(), &size)) throw Error("runtime_path", "Cannot locate the executable.");
-    return fs::canonical(buffer.data());
+    std::error_code error;
+    auto path = fs::canonical("/proc/self/exe", error);
+    if (error) throw Error("runtime_path", "Cannot locate the executable.");
+    return path;
 }
 fs::path user_home() {
     const char* home = std::getenv("HOME");
@@ -135,67 +181,34 @@ void write_json(const fs::path& path, const Json& value) {
 std::string sha256(const fs::path& path) {
     std::ifstream stream(path, std::ios::binary);
     if (!stream) throw Error("missing_assets", "Required asset is missing or unreadable.");
-    CC_SHA256_CTX context;
-    CC_SHA256_Init(&context);
+    Sha256 context;
     std::array<char, 65536> buffer{};
     while (stream) {
         stream.read(buffer.data(), buffer.size());
-        CC_SHA256_Update(&context, buffer.data(), static_cast<CC_LONG>(stream.gcount()));
+        context.update(reinterpret_cast<const unsigned char*>(buffer.data()), static_cast<size_t>(stream.gcount()));
     }
     if (!stream.eof()) throw Error("asset_read", "Failed while reading an asset.");
-    unsigned char digest[CC_SHA256_DIGEST_LENGTH];
-    CC_SHA256_Final(digest, &context);
-    return hex(digest, sizeof(digest));
+    return context.finish();
 }
 std::string text_sha256(const std::string& text) {
-    unsigned char digest[CC_SHA256_DIGEST_LENGTH];
-    CC_SHA256(text.data(), static_cast<CC_LONG>(text.size()), digest);
-    return hex(digest, sizeof(digest));
+    Sha256 context;
+    context.update(reinterpret_cast<const unsigned char*>(text.data()), text.size());
+    return context.finish();
 }
 void require_hash(const fs::path& path, const std::string& expected) {
     if (expected.size() != 64 || sha256(path) != expected)
         throw Error("asset_mismatch", "An asset does not match its pinned SHA256.");
 }
-void download(const std::string& url, const fs::path& destination, const std::string& expected, uint64_t max_bytes) {
-    if (fs::exists(destination)) { require_hash(destination, expected); return; }
-    auto partial = destination;
-    partial += ".download";
-    uint64_t existing = fs::exists(partial) ? fs::file_size(partial) : 0;
-    if (existing > max_bytes) throw Error("download_size", "The partial download exceeds its size limit.");
-    if (existing && sha256(partial) == expected) {
-        fs::rename(partial, destination);
-        return;
-    }
-    Download state{std::ofstream(partial, std::ios::binary | std::ios::app), existing, max_bytes};
-    if (!state.stream) throw Error("download_write", "Cannot create the download file.");
-    CURL* handle = curl_easy_init();
-    if (!handle) throw Error("download_init", "Cannot initialize HTTPS downloads.");
-    curl_easy_setopt(handle, CURLOPT_URL, url.c_str());
-    curl_easy_setopt(handle, CURLOPT_FOLLOWLOCATION, 1L);
-    curl_easy_setopt(handle, CURLOPT_PROTOCOLS_STR, "https");
-    curl_easy_setopt(handle, CURLOPT_REDIR_PROTOCOLS_STR, "https");
-    curl_easy_setopt(handle, CURLOPT_MAXREDIRS, 8L);
-    curl_easy_setopt(handle, CURLOPT_CONNECTTIMEOUT, 30L);
-    curl_easy_setopt(handle, CURLOPT_TIMEOUT, 1200L);
-    curl_easy_setopt(handle, CURLOPT_FAILONERROR, 1L);
-    if (existing) curl_easy_setopt(handle, CURLOPT_RESUME_FROM_LARGE, static_cast<curl_off_t>(existing));
-    curl_easy_setopt(handle, CURLOPT_WRITEFUNCTION, receive);
-    curl_easy_setopt(handle, CURLOPT_WRITEDATA, &state);
-    CURLcode result = curl_easy_perform(handle);
-    curl_easy_cleanup(handle);
-    state.stream.close();
-    if (result != CURLE_OK || !state.stream) throw Error("download_failed", "HTTPS download failed; no installation activated.");
-    require_hash(partial, expected);
-    fs::rename(partial, destination);
-}
+// Installation work yields to interactive processes; inference uses normal priority.
 void background() {
-    if (setpriority(PRIO_DARWIN_PROCESS, 0, PRIO_DARWIN_BG) != 0 ||
-        pthread_set_qos_class_self_np(QOS_CLASS_BACKGROUND, 0) != 0)
+    if (setpriority(PRIO_PROCESS, 0, 10) != 0)
         throw Error("scheduling_failed", "Cannot enable background scheduling.");
 }
 void default_priority() {
-    if (setpriority(PRIO_DARWIN_PROCESS, 0, 0) != 0 ||
-        pthread_set_qos_class_self_np(QOS_CLASS_DEFAULT, 0) != 0)
+    errno = 0;
+    const int current = getpriority(PRIO_PROCESS, 0);
+    // An unprivileged process cannot lower its niceness; keep an inherited nicer value.
+    if (errno == 0 && current < 0 && setpriority(PRIO_PROCESS, 0, 0) != 0)
         throw Error("scheduling_failed", "Cannot enable default-priority inference.");
 }
 const Json& model_assets() {
@@ -203,39 +216,29 @@ const Json& model_assets() {
     return assets;
 }
 std::string model_assets_id() { return model_assets_sha256; }
-fs::path model_cache() { return user_home() / "Library/Caches/Deckard/coreml"; }
 void verify_model_assets(const fs::path& directory, bool verify_hashes) {
     std::error_code error;
     const auto root = fs::canonical(directory, error);
-    if (error) throw Error("missing_assets", "Core ML model assets are missing. Install the Core ML release bundle.");
-    std::set<fs::path> directories;
+    if (error) throw Error("missing_assets", "Model assets are missing. Install the Deckard release bundle.");
     const auto& files = model_assets().at("files");
     for (auto it = files.begin(); it != files.end(); ++it) {
-        const fs::path relative(it.key());
-        fs::path current = root;
-        for (const auto& part : relative) {
-            current /= part;
-            const auto status = fs::symlink_status(current);
-            if (status.type() == fs::file_type::not_found)
-                throw Error("missing_assets", "Core ML model assets are missing. Install the Core ML release bundle.");
-            const bool leaf = current == root / relative;
-            if (leaf ? !fs::is_regular_file(status) : !fs::is_directory(status))
-                throw Error("asset_mismatch", "Model assets must be ordinary files and directories, not links.");
-            if (!leaf) directories.insert(current.lexically_relative(root));
-        }
-        if (verify_hashes) require_hash(root / relative, it.value().get<std::string>());
+        const auto status = fs::symlink_status(root / it.key());
+        if (status.type() == fs::file_type::not_found)
+            throw Error("missing_assets", "Model assets are missing. Install the Deckard release bundle.");
+        if (!fs::is_regular_file(status))
+            throw Error("asset_mismatch", "Model assets must be ordinary files, not links.");
+        if (verify_hashes) require_hash(root / it.key(), it.value().get<std::string>());
     }
-    // Core ML must never consume extra, unpinned files hidden inside the package.
-    for (const auto& entry : fs::recursive_directory_iterator(root / model_assets().at("model_package").get<std::string>())) {
-        const auto relative = entry.path().lexically_relative(root);
-        const auto status = entry.symlink_status();
-        if ((fs::is_directory(status) && directories.count(relative)) ||
-            (fs::is_regular_file(status) && files.contains(relative.generic_string()))) continue;
-        throw Error("asset_mismatch", "The Core ML package contains unexpected assets.");
-    }
+    // ONNX Runtime resolves external data beside the model: never allow unpinned neighbours.
+    for (const auto& entry : fs::directory_iterator(root))
+        if (!files.contains(entry.path().filename().string()))
+            throw Error("asset_mismatch", "The model directory contains unexpected assets.");
 }
+// Firefox add-on IDs: email-like ("name@domain") or a braced GUID.
 bool extension_id_valid(const std::string& id) {
-    return id.size() == 32 && id.find_first_not_of("abcdefghijklmnop") == std::string::npos;
+    static const std::regex email(R"(^[A-Za-z0-9._+-]{1,64}@[A-Za-z0-9-]{1,63}(\.[A-Za-z0-9-]{1,63})*$)");
+    static const std::regex guid(R"(^\{[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}\}$)");
+    return id.size() <= 80 && (std::regex_match(id, email) || std::regex_match(id, guid));
 }
 size_t characters(const std::string& text) { return codepoints(text).size(); }
 size_t words(const std::string& text) {
@@ -279,16 +282,18 @@ Json installed_config(const fs::path& home, bool verify) {
         config.value("policy", Json()) != policy_id || config.value("flag_threshold", Json()) != flag_threshold ||
         config.value("experimental", Json()) != true ||
         config.value("runtime", Json()) != runtime_id ||
-        config.value("source", Json()) != "verified-coreml-export" ||
+        config.value("source", Json()) != "verified-onnx-export" ||
         config.value("weights_sha256", Json()) != packed_sha ||
         config.value("tokenizer_sha256", Json()) != tokenizer_sha ||
         config.value("model_assets_sha256", Json()) != model_assets_id() ||
-        config.value("model_files", Json()) != model_assets().at("files"))
-        throw Error("invalid_installation", "Installation metadata is incompatible. Install the Core ML release bundle.");
+        config.value("model_files", Json()) != model_assets().at("files") ||
+        !config.value("onnxruntime_sha256", Json()).is_string())
+        throw Error("invalid_installation", "Installation metadata is incompatible. Install the Deckard release bundle.");
     const auto models = fs::canonical(home) / "models";
     if (!fs::is_directory(fs::symlink_status(models)))
         throw Error("missing_assets", "Model assets are missing or redirected. Run deckard install.");
     verify_model_assets(models, verify);
+    if (verify) require_hash(fs::canonical(home) / onnxruntime_library, config["onnxruntime_sha256"].get<std::string>());
     return config;
 }
 }

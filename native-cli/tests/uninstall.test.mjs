@@ -18,8 +18,10 @@ function fixture(t, version = currentVersion) {
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   const home = path.join(root, "application with spaces");
   const manifests = path.join(root, "native manifests");
-  const coreml = ["0.6.0", "0.6.1", "0.6.2", "0.6.3", currentVersion].includes(version);
-  const owned = coreml || ["0.4.0", "0.4.1", "0.5.0"].includes(version);
+  // Only Linux/ONNX releases are owned; macOS-era metadata (0.4.x-0.6.x) is foreign here.
+  const current = version === currentVersion;
+  const legacy = ["0.4.0", "0.4.1", "0.5.0", "0.6.0", "0.6.4"].includes(version);
+  const owned = current || legacy;
   const hostName = owned ? host : "com.example.other";
   const registration = path.join(manifests, `${hostName}.json`);
   const userHome = path.join(root, "user");
@@ -27,12 +29,12 @@ function fixture(t, version = currentVersion) {
   const run = (args = [], env = {}) => spawnSync(binary,
     ["uninstall", "--home", home, "--manifest-dir", manifests, ...args],
     { encoding: "utf8", timeout: 10000, env: { ...process.env, HOME: userHome, ...env } });
-  const config = coreml ? { ...installationMetadata(), version } : {
+  const config = current ? { ...installationMetadata(), version } : {
     format: 1, product: "Deckard", version, model: "ShantanuT01/gradient-ai-text-detector",
     revision: "c2e8b6df87f8a211cbffb713fa9873a0c3a9713f",
     policy: version === "0.5.0" ? "gradient-q4-two-scale-v1" : "gradient-q4-composite-v1-retrospective",
     flag_threshold: version === "0.5.0" ? 0.97 : 0.9824231167326641,
-    experimental: true, extension_id: "a".repeat(32), source: "verified-packed-export",
+    experimental: true, extension_id: "bkihjdkalohbkgnjjoobababhipefjdg", source: "verified-packed-export",
     weights_sha256: "1".repeat(64), tokenizer_sha256: "2".repeat(64), binary_sha256: "3".repeat(64),
     mlx_sha256: "4".repeat(64), metal_sha256: "5".repeat(64),
     license_files: ["share/licenses/MLX-LICENSE"],
@@ -45,7 +47,7 @@ function fixture(t, version = currentVersion) {
   const release = path.join(home, "releases", name);
   function install() {
     write(path.join(release, "install.json"), sorted);
-    const payload = coreml ? Object.keys(assets.files).map(name => `models/${name}`) :
+    const payload = current ? [...Object.keys(assets.files).map(name => `models/${name}`), "lib/libonnxruntime.so.1"] :
       ["lib/libmlx.dylib", "lib/mlx.metallib", "models/packed.safetensors", "models/tokenizer.json"];
     for (const file of [`bin/${cli}`, ...payload, ...licenses])
       write(path.join(release, file));
@@ -53,7 +55,7 @@ function fixture(t, version = currentVersion) {
     fs.symlinkSync(`releases/${name}`, path.join(home, "current"));
     write(registration, JSON.stringify({
       name: hostName, type: "stdio", path: path.join(home, `current/bin/${cli}-host`),
-      allowed_origins: [`chrome-extension://${"a".repeat(32)}/`],
+      allowed_extensions: [config.extension_id],
     }));
   }
   return { root, home, userHome, manifests, registration, release, run, install };
@@ -69,13 +71,14 @@ test("absent uninstall is idempotent and creates no directories", t => {
   }
 });
 
-for (const version of ["0.4.0", "0.4.1", "0.5.0", "0.6.0", "0.6.1", "0.6.2", "0.6.3"]) test(`uninstall still recognizes positively owned Deckard ${version} releases`, t => {
+for (const version of ["0.4.0", "0.5.0", "0.6.0", "0.6.4"]) test(`uninstall refuses macOS-era Deckard ${version} metadata without removing anything`, t => {
   const f = fixture(t, version);
   f.install();
   const result = f.run();
-  assert.equal(result.status, 0, result.stderr);
-  assert.ok(!fs.existsSync(f.release));
-  assert.ok(!fs.existsSync(f.registration));
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /uninstall_conflict/);
+  assert.ok(fs.existsSync(path.join(f.release, "install.json")));
+  assert.ok(fs.existsSync(f.registration));
 });
 
 test("uninstall removes owned files only and retains the lock inode", t => {

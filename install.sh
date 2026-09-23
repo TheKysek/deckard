@@ -9,8 +9,8 @@ deckard_bootstrap() (
   usage() {
     printf '%s\n' \
       'Usage: install.sh [--yes] [--no-open] [--shell zsh|bash|none] [--home DIR] [--manifest-dir DIR] [--extension-id ID]' \
-      'Chrome is never opened automatically; --no-open explicitly selects this default.' \
-      'After installation, follow the native CLI instructions to load the extension manually in Chrome.'
+      'Firefox is never opened automatically; --no-open explicitly selects this default.' \
+      'After installation, follow the native CLI instructions to add the extension to Firefox.'
   }
   yes=false
   shell_choice=
@@ -45,17 +45,21 @@ deckard_bootstrap() (
     zsh|bash|none) ;;
     *) fail 'Specify --shell zsh, --shell bash, or --shell none (or set SHELL to zsh/bash).' ;;
   esac
-  [ "$(uname -s)" = Darwin ] && [ "$(uname -m)" = arm64 ] ||
-    fail 'macOS 15 or newer on Apple Silicon (arm64) is required.'
-  version=$(sw_vers -productVersion) || fail 'Cannot determine macOS version.'
-  major=${version%%.*}
-  case "$major" in ''|*[!0-9]*) fail "Invalid macOS version: $version" ;; esac
-  [ "$major" -ge 15 ] || fail 'macOS 15 or newer is required.'
+  release_arch='@ARCH@'
+  case "$release_arch" in
+    x86_64|aarch64) ;;
+    *) fail 'This source template is not a release installer: missing pinned archive architecture.' ;;
+  esac
+  [ "$(uname -s)" = Linux ] || fail 'Linux is required.'
+  machine=$(uname -m)
+  [ "$machine" = arm64 ] && machine=aarch64
+  [ "$machine" = "$release_arch" ] ||
+    fail "This installer is for Linux $release_arch; build from source on $machine (see README)."
   if [ "$yes" = false ]; then
     if ! { exec 3<>/dev/tty; } 2>/dev/null; then
       fail 'No controlling terminal. Re-run with --yes and a supported --shell (or SHELL).'
     fi
-    printf 'Install Deckard v0.6.4 (including Core ML model weights) and configure shell %s? [y/N] ' "$shell_choice" >&3
+    printf 'Install Deckard v0.7.0 (including ONNX model weights) and configure shell %s? [y/N] ' "$shell_choice" >&3
     answer=
     IFS= read -r answer <&3 || fail 'Confirmation could not be read.'
     exec 3>&-
@@ -68,13 +72,13 @@ deckard_bootstrap() (
   [ "${#expected}" -eq 64 ] || fail 'Invalid pinned archive SHA-256.'
   case "$app_expected" in ''|*[!0-9a-f]*) fail 'Missing pinned app archive SHA-256.' ;; esac
   [ "${#app_expected}" -eq 64 ] || fail 'Invalid pinned app archive SHA-256.'
-  for tool in curl shasum tar awk sort uniq wc readlink; do
+  for tool in curl sha256sum tar awk sort uniq wc readlink; do
     command -v "$tool" >/dev/null || fail "Required command not found: $tool"
   done
   printf '%s\n' "$model_sums" | awk '
     NF != 2 || length($1) != 64 || $1 ~ /[^0-9a-f]/ { exit 1 }
     $2 !~ /^[A-Za-z0-9_.\/-]+$/ || $2 ~ /^\// || $2 ~ /(^|\/)\.\.?($|\/)/ || $2 ~ /\/\// { exit 1 }
-    END { if (NR != 4) exit 1 }
+    END { if (NR != 3) exit 1 }
   ' || fail 'Invalid pinned model checksums.'
   cached_model() (
     [ -L "$install_home/current" ] || exit 1
@@ -96,14 +100,14 @@ deckard_bootstrap() (
       done
       file="$directory/$remaining"
       [ -f "$file" ] && [ ! -L "$file" ] || exit 1
-      actual=$(shasum -a 256 "$file") || exit 1
+      actual=$(sha256sum "$file") || exit 1
       [ "${actual%% *}" = "$checksum" ] || exit 1
     done <<< "$model_sums"
     printf '%s\n' "$source"
   )
-  archive_name=deckard-v0.6.4-macos-arm64.tar.gz
+  archive_name="deckard-v0.7.0-linux-$release_arch.tar.gz"
   if model_source=$(cached_model); then
-    archive_name=deckard-v0.6.4-macos-arm64-app.tar.gz
+    archive_name="deckard-v0.7.0-linux-$release_arch-app.tar.gz"
     expected=$app_expected
     printf 'Installed model checksums match. Downloading the app-only update; reusing local model files.\n'
   else
@@ -116,15 +120,15 @@ deckard_bootstrap() (
   trap 'exit 130' INT
   trap 'exit 143' TERM HUP
   archive="$work/$archive_name"
-  url="https://github.com/sgoedecke/deckard/releases/download/v0.6.4/$archive_name"
-  printf 'Downloading Deckard v0.6.4…\n'
+  url="https://github.com/thekysek/deckard/releases/download/v0.7.0/$archive_name"
+  printf 'Downloading Deckard v0.7.0…\n'
   curl --fail --location --proto '=https' --proto-redir '=https' \
     --connect-timeout 30 --max-time 1800 --output "$archive" "$url" ||
-    fail 'Download failed. The pinned v0.6.4 release must be published before this installer can be used.'
+    fail 'Download failed. The pinned v0.7.0 release must be published before this installer can be used.'
   archive_bytes=$(wc -c < "$archive")
   [ "$archive_bytes" -gt 0 ] && [ "$archive_bytes" -lt 2147483648 ] ||
     fail 'Release archive must be under 2147483648 bytes (2 GiB).'
-  actual=$(shasum -a 256 "$archive")
+  actual=$(sha256sum "$archive")
   actual=${actual%% *}
   [ "$actual" = "$expected" ] || fail 'Archive SHA-256 checksum mismatch; nothing was installed.'
   tar -tzf "$archive" > "$work/entries" || fail 'Cannot inspect release archive.'
@@ -134,15 +138,15 @@ deckard_bootstrap() (
   awk '
     !/^[A-Za-z0-9_.\/-]+$/ { exit 1 }
     /^\// || /(^|\/)\.\.?($|\/)/ || /\/\// { exit 1 }
-    !/^(bin|share|extension|models)(\/|$)/ { exit 1 }
-    /(^|\/)(packed\.safetensors|libmlx\.dylib|mlx\.metallib|MLX-LICENSE)($|\/)/ { exit 1 }
+    !/^(bin|lib|share|extension|models)(\/|$)/ { exit 1 }
+    /(^|\/)(packed\.safetensors|model\.mlpackage|libmlx\.dylib|mlx\.metallib|MLX-LICENSE)($|\/)/ { exit 1 }
     NR > 20000 { exit 1 }
     END { if (NR == 0) exit 1 }
   ' "$work/entries" || fail 'Unsafe archive path.'
   awk 'substr($0,1,1) != "-" && substr($0,1,1) != "d" { exit 1 }
        END { if (NR == 0) exit 1 }' "$work/details" || fail 'Archive links or special files are not permitted.'
   # BSD tar has separate numeric uid/gid columns; GNU tar uses uid/gid.
-  # The FP16 payload is roughly 1 GiB, so retain room for it while bounding
+  # The model payload is roughly 360 MiB, so retain room for it while bounding
   # individual members, total extracted bytes, and entry count.
   awk '{
          size = ($2 ~ /^[0-9]+\/[0-9]+$/) ? $3 : $5
@@ -155,14 +159,12 @@ deckard_bootstrap() (
     fail 'Duplicate archive paths are not permitted.'
   mkdir "$work/bundle"
   tar -xzf "$archive" -C "$work/bundle" --no-same-owner --no-same-permissions \
-    --no-xattrs --no-acls --no-fflags || fail 'Archive extraction failed.'
+    --no-xattrs --no-acls || fail 'Archive extraction failed.'
   bundle="$work/bundle"
   if [ -z "$model_source" ]; then model_source="$bundle/models"; fi
-  [ -x "$bundle/bin/deckard" ] &&
+  [ -x "$bundle/bin/deckard" ] && [ -f "$bundle/lib/libonnxruntime.so.1" ] &&
     [ -d "$bundle/share/licenses" ] && [ -f "$bundle/extension/manifest.json" ] &&
-    [ -f "$model_source/model.mlpackage/Manifest.json" ] &&
-    [ -f "$model_source/model.mlpackage/Data/com.apple.CoreML/model.mlmodel" ] &&
-    [ -f "$model_source/model.mlpackage/Data/com.apple.CoreML/weights/weight.bin" ] &&
+    [ -f "$model_source/model.onnx" ] && [ -f "$model_source/model.onnx.data" ] &&
     [ -f "$model_source/tokenizer.json" ] ||
     fail 'Release archive is missing required files.'
   "$bundle/bin/deckard" "${native_options[@]}" --model-dir "$model_source" \

@@ -2,12 +2,17 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { execFileSync } from 'node:child_process';
-import { validatePins, verifyAssets, copyAssets, sha256, checkArchiveSize, renderInstaller } from './release-assets.mjs';
+import {
+  validatePins, verifyAssets, copyAssets, sha256, checkArchiveSize, renderInstaller, releaseArchitectures,
+  zipArchive, extensionFiles,
+} from './release-assets.mjs';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const version = '0.6.4';
-const archiveName = `deckard-v${version}-macos-arm64.tar.gz`;
-const appArchiveName = `deckard-v${version}-macos-arm64-app.tar.gz`;
+const version = '0.7.0';
+const arch = releaseArchitectures[process.arch];
+const archiveName = `deckard-v${version}-linux-${arch}.tar.gz`;
+const appArchiveName = `deckard-v${version}-linux-${arch}-app.tar.gz`;
+const xpiName = `deckard-v${version}.xpi`;
 const options = { '--native-dist': path.join(root, 'native-cli/build/dist'), '--output-dir': path.join(root, `dist/v${version}`) };
 for (let i = 2; i < process.argv.length; i += 2) {
   const key = process.argv[i];
@@ -17,8 +22,8 @@ for (let i = 2; i < process.argv.length; i += 2) {
   options[key] = path.resolve(process.argv[i + 1]);
 }
 if (!options['--model-dir']) throw new Error('--model-dir is required; the canonical model is read-only.');
-if (process.platform !== 'darwin' || process.arch !== 'arm64') throw new Error('Packaging requires Apple Silicon macOS.');
-const run = (command, args) => execFileSync(command, args, { stdio: 'inherit', env: { ...process.env, COPYFILE_DISABLE: '1', LC_ALL: 'C' } });
+if (process.platform !== 'linux' || !arch) throw new Error('Packaging requires Linux on x86_64 or aarch64.');
+const run = (command, args) => execFileSync(command, args, { stdio: 'inherit', env: { ...process.env, LC_ALL: 'C' } });
 async function tree(directory, prefix = '') {
   const entries = [];
   for (const name of (await fs.readdir(directory)).sort()) {
@@ -37,7 +42,8 @@ const modelHashes = validatePins(JSON.parse(pinsContent));
 await verifyAssets(options['--model-dir'], modelHashes);
 const native = options['--native-dist'];
 await tree(native);
-for (const required of ['bin/deckard', 'share/licenses/NLOHMANN-LICENSE', 'share/licenses/Cargo.lock', 'share/licenses/rust-stdlib/COPYRIGHT-library.html']) {
+for (const required of ['bin/deckard', 'lib/libonnxruntime.so.1', 'share/licenses/NLOHMANN-LICENSE', 'share/licenses/Cargo.lock',
+  'share/licenses/rust-stdlib/COPYRIGHT-library.html', 'share/licenses/onnxruntime/LICENSE']) {
   if (!(await fs.stat(path.join(native, required))).isFile()) throw new Error(`Missing native distribution file: ${required}`);
 }
 const nativeVersion = execFileSync(path.join(native, 'bin/deckard'), ['--version'], { encoding: 'utf8' }).trim();
@@ -53,10 +59,9 @@ try {
   const bundle = path.join(staging, 'bundle');
   await fs.mkdir(path.join(bundle, 'bin'), { recursive: true });
   await fs.copyFile(path.join(native, 'bin/deckard'), path.join(bundle, 'bin/deckard'));
-  await fs.cp(path.join(native, 'share/licenses'), path.join(bundle, 'share/licenses'), {
-    recursive: true,
-    filter: source => path.basename(source) !== 'MLX-LICENSE',
-  });
+  await fs.mkdir(path.join(bundle, 'lib'));
+  await fs.copyFile(path.join(native, 'lib/libonnxruntime.so.1'), path.join(bundle, 'lib/libonnxruntime.so.1'));
+  await fs.cp(path.join(native, 'share/licenses'), path.join(bundle, 'share/licenses'), { recursive: true });
   await fs.writeFile(path.join(bundle, 'share/licenses/model-assets.json'), pinsContent);
   await fs.cp(path.join(root, 'extension'), path.join(bundle, 'extension'), {
     recursive: true,
@@ -69,15 +74,10 @@ try {
   await fs.copyFile(path.join(root, 'LICENSE'), path.join(bundle, 'share/licenses/DECKARD-LICENSE'));
   await fs.cp(path.join(root, 'docs/licenses'), path.join(bundle, 'share/licenses/models'), { recursive: true });
   await fs.copyFile(path.join(root, 'docs/MODEL-ATTRIBUTION.md'), path.join(bundle, 'share/licenses/MODEL-ATTRIBUTION.md'));
-  let entries = await tree(bundle);
-  for (const entry of entries.filter(name => name.endsWith('.dylib'))) {
-    run('/usr/bin/codesign', ['--force', '--sign', '-', '--timestamp=none', path.join(bundle, entry)]);
-    run('/usr/bin/codesign', ['--verify', '--strict', path.join(bundle, entry)]);
-  }
-  run('/usr/bin/codesign', ['--force', '--sign', '-', '--timestamp=none', path.join(bundle, 'bin/deckard')]);
-  run('/usr/bin/codesign', ['--verify', '--strict', path.join(bundle, 'bin/deckard')]);
-  run('/usr/bin/lipo', [path.join(bundle, 'bin/deckard'), '-verify_arch', 'arm64']);
-  entries = await tree(bundle);
+  // The bundled executable must start with its bundled ONNX Runtime on this architecture.
+  const bundledVersion = execFileSync(path.join(bundle, 'bin/deckard'), ['--version'], { encoding: 'utf8' }).trim();
+  if (bundledVersion !== version) throw new Error('The bundled executable does not run.');
+  const entries = await tree(bundle);
   const epoch = new Date('2026-01-01T00:00:00Z');
   for (const entry of [...entries].reverse()) {
     const file = path.join(bundle, entry);
@@ -88,9 +88,9 @@ try {
     const fileList = path.join(staging, `${name}.entries`);
     await fs.writeFile(fileList, included.join('\n') + '\n');
     const tarFile = path.join(staging, name.slice(0, -3));
-    run('/usr/bin/tar', ['--format', 'ustar', '--no-recursion', '--uid', '0', '--gid', '0', '--uname', 'root', '--gname', 'wheel',
-      '--no-xattrs', '--no-acls', '--no-fflags', '-cf', tarFile, '-C', bundle, '-T', fileList]);
-    run('/usr/bin/gzip', ['-n', '-9', tarFile]);
+    run('tar', ['--format=ustar', '--no-recursion', '--owner=0', '--group=0', '--numeric-owner',
+      '--mtime=@1767225600', '--no-xattrs', '--no-acls', '-cf', tarFile, '-C', bundle, '-T', fileList]);
+    run('gzip', ['-n', '-9', tarFile]);
     const archive = path.join(staging, name);
     const bytes = checkArchiveSize((await fs.stat(archive)).size);
     return { name, bytes, digest: await sha256(archive) };
@@ -99,17 +99,22 @@ try {
   const app = await pack(appArchiveName, entries.filter(name => !name.startsWith('models/')));
   const template = await fs.readFile(path.join(root, 'install.sh'), 'utf8');
   const installer = renderInstaller(template, {
-    archiveSha256: full.digest, appSha256: app.digest, pins: JSON.parse(pinsContent),
+    archiveSha256: full.digest, appSha256: app.digest, pins: JSON.parse(pinsContent), arch,
   });
+  // Unsigned .xpi of the same extension; scripts/sign-extension.sh produces the AMO-signed one.
+  await fs.writeFile(path.join(staging, xpiName), zipArchive(await extensionFiles(path.join(bundle, 'extension'))));
+  const xpiDigest = await sha256(path.join(staging, xpiName));
   await fs.writeFile(path.join(staging, 'install.sh'), installer, { mode: 0o755 });
   const installerDigest = await sha256(path.join(staging, 'install.sh'));
   await fs.writeFile(path.join(staging, 'SHA256SUMS'),
-    `${full.digest}  ${archiveName}\n${app.digest}  ${appArchiveName}\n${installerDigest}  install.sh\n`);
-  for (const name of [archiveName, appArchiveName, 'install.sh', 'SHA256SUMS']) await fs.rename(path.join(staging, name), path.join(out, name));
+    `${full.digest}  ${archiveName}\n${app.digest}  ${appArchiveName}\n${installerDigest}  install.sh\n${xpiDigest}  ${xpiName}\n`);
+  for (const name of [archiveName, appArchiveName, 'install.sh', xpiName, 'SHA256SUMS']) {
+    await fs.rename(path.join(staging, name), path.join(out, name));
+  }
   for (const archive of [full, app]) {
     console.log(`Packaged ${path.join(out, archive.name)}\nArchive bytes: ${archive.bytes} (under 2147483648)\nSHA-256: ${archive.digest}`);
   }
-  console.log('Ad-hoc signatures verified. Not notarized. No release was published.');
+  console.log(`Unsigned add-on: ${path.join(out, xpiName)}. No release was published.`);
 } finally {
   await fs.rm(staging, { recursive: true, force: true });
 }

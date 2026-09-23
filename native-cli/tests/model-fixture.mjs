@@ -10,10 +10,11 @@ export function installationMetadata() {
   return {
     format: 1, product: "Deckard", version, model: assets.model, revision: assets.revision,
     policy: "gradient-q4-two-scale-v1", flag_threshold: 0.97, experimental: true,
-    extension_id: "a".repeat(32), source: "verified-coreml-export", runtime: assets.runtime,
+    extension_id: "deckard@thekysek.github.io", source: "verified-onnx-export", runtime: assets.runtime,
     weights_sha256: assets.source_weights_sha256, tokenizer_sha256: assets.files["tokenizer.json"],
     model_assets_sha256: assetsHash, model_files: assets.files,
-    binary_sha256: "3".repeat(64), license_files: ["share/licenses/NLOHMANN-LICENSE"],
+    binary_sha256: "3".repeat(64), onnxruntime_sha256: "4".repeat(64),
+    license_files: ["share/licenses/NLOHMANN-LICENSE"],
   };
 }
 

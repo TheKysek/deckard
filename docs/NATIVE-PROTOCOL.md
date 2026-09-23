@@ -1,58 +1,70 @@
-# Deckard 0.6.0 native messaging protocol v3 (Gradient)
+# Deckard 0.7.0 native messaging protocol v3 (Gradient)
 
-Implemented by `native-cli/`; release users need no Python, torch, or Xcode.
-This describes the v0.6.0 Core ML release contract.
+Implemented by `native-cli/`; release users need no Python or torch.
+This describes the v0.7.0 Linux/ONNX Runtime release contract for Firefox.
 
-Host name: `com.sgoedecke.deckard`. Chrome launches `deckard start` for the service
-worker's `connectNative` port; this is a stdio host, not an HTTP daemon.
+Host name: `com.sgoedecke.deckard`. The installer registers
+`~/.mozilla/native-messaging-hosts/com.sgoedecke.deckard.json` with
+`allowed_extensions: ["deckard@thekysek.github.io"]`. Firefox launches the
+registered `current/bin/deckard-host` with two arguments, the manifest path and the
+calling add-on ID; the host refuses to serve unless that ID equals the installed
+`extension_id`. `deckard start` serves the same protocol for manual use. This is a
+stdio host, not an HTTP daemon.
 Each message is UTF-8 JSON preceded by a four-byte
 unsigned length in native byte order. Stdout contains only these frames; stderr
 contains error codes without page text.
 
-The implementation limits incoming frames to 4 MiB; responses remain below Chrome's 1 MiB limit.
+The implementation limits incoming frames to 4 MiB; responses remain below the browser's 1 MiB limit.
 It accepts only the documented fields. Malformed frames produce an error and
 close the host; well-framed invalid requests produce an error reply.
 EOF on stdin releases the process, its resident model, and its in-memory score
-cache. The on-disk compiled-model cache persists across host lifetimes.
+cache. Nothing is cached on disk.
 
 ## Runtime and assets
 
-Production metadata reports `runtime: "native-coreml"` and
+Production metadata reports `runtime: "native-onnx"` and
 `scheduling: "default"`. The extension accepts both default scheduling and
-legacy `background` metadata during upgrades; this does not change the new
-helper's scheduling policy. Reload the installed extension at
-`chrome://extensions` after upgrading so its updated protocol validation is
-active. Public Core ML `CPU_AND_NE`
-(`MLComputeUnitsCPUAndNeuralEngine`) limits execution to CPU and Neural Engine.
-There are no private ANE hooks or silent GPU fallback. Failure to verify,
-compile, or load the model is surfaced as an error, never an alternate backend.
+legacy `background` metadata. Inference runs on the CPU with the release's own
+ONNX Runtime 1.22.0 (`lib/libonnxruntime.so.1`, found through the executable's
+`$ORIGIN/../lib` RPATH), using up to half of the available cores. There is no
+GPU execution provider and no silent fallback: failure to verify or load the
+model is surfaced as an error.
 
-The model is a single resident, fixed-512-token FP16 package derived from the
-decoded canonical q4 weights. FP16 does not restore original FP32 weights or
-mean 4-bit ANE arithmetic. The tokenizer, scoring policy, protocol version and
-reference cutoff remain unchanged; policy identity is still
+The model is an ONNX export of the canonical Gradient q4 checkpoint
+(`packed.safetensors`, SHA-256 `85a9e02e…97ac98`, MLX affine q4, 64-value groups).
+Every quantized projection is a `com.microsoft.MatMulNBits` node carrying the
+original 4-bit codes and FP16 scales, with the MLX bias expressed as a float zero
+point; word embeddings stay 4-bit and are dequantized per token with the
+reference FP16 rounding. Activations are FP32. Scores match a PyTorch reference
+of the same dequantized weights to within 1e-4, so the tokenizer, scoring policy,
+protocol version and reference cutoff are unchanged; policy identity is still
 `gradient-q4-two-scale-v1`.
 
 `deckard install --model-dir DIR` and `deckard verify --model DIR` take a
-directory containing `model.mlpackage/` and `tokenizer.json`. The package's
-`Manifest.json`, `Data/com.apple.CoreML/model.mlmodel`,
-`Data/com.apple.CoreML/weights/weight.bin`, and the tokenizer are SHA-256-pinned
-by `native-cli/model-assets.json` at build time. A release may include a copy
-under `share/licenses/model-assets.json` for installed provenance; runtime verification uses
-embedded pins, not mutable pins from that sidecar.
+directory containing exactly `model.onnx`, `model.onnx.data` and `tokenizer.json`.
+All three are SHA-256-pinned by `native-cli/model-assets.json` at build time and
+verified before the first model load and by `deckard status`; unpinned
+neighbouring files are rejected because ONNX Runtime resolves external data
+beside the model. A release may include a copy under
+`share/licenses/model-assets.json` for installed provenance; runtime verification
+uses embedded pins, not mutable pins from that sidecar. The installed ONNX Runtime
+library's hash is recorded in `install.json` and checked by `deckard status`.
 
-The first actual model use compiles and loads locally. Later starts reuse a
-validated compiled artifact in `~/Library/Caches/Deckard/coreml`, keyed by model
-artifact, macOS build, and hardware. This is separate from the bounded
-in-memory score cache below and contains no page text. Installation and ping
-do not require inference. The host keeps one model loaded until it exits.
+`native-cli/onnx/export.py` regenerates the model deterministically from the
+canonical checkpoint (`scripts/export-model.sh`), and `native-cli/onnx/fixtures.json`
+holds reference logits for `deckard verify` (score tolerance 0.002).
+
+The model loads on first use; installation and ping do not require inference.
+The host keeps one model loaded until it exits.
 
 ### Installer downloads
 
-Release packaging produces a full `deckard-vVERSION-macos-arm64.tar.gz` and
-an app-only `deckard-vVERSION-macos-arm64-app.tar.gz`, plus `install.sh` and
-`SHA256SUMS`. Publish all four assets. The app archive contains the same
-executable, extension, and licenses, but no model payload.
+Release packaging produces a full `deckard-vVERSION-linux-ARCH.tar.gz` and
+an app-only `deckard-vVERSION-linux-ARCH-app.tar.gz`, plus `install.sh`,
+the unsigned `deckard-vVERSION.xpi` and `SHA256SUMS`. Publish all of them (and,
+optionally, an AMO-signed `.xpi`). The app archive contains the same executable,
+ONNX Runtime, extension, and licenses, but no model payload. An installer is
+built for one architecture and refuses others.
 
 The installer checks each installed model file against checksums embedded
 from the target release's pins, respecting a custom `--home` prefix. Matching
@@ -65,30 +77,35 @@ downloading the full model.
 
 ## Extension page authorization
 
-Deckard declares required HTTP/HTTPS host permissions. A missing saved
-`enabled` preference defaults On only after Chrome confirms both grants;
+Deckard declares HTTP/HTTPS host permissions, which Firefox treats as user-granted.
+A missing saved `enabled` preference defaults On only after Firefox confirms both grants;
 explicit Off and malformed saved values remain Off. Runtime settings
 normalization itself remains fail-closed. Revocation immediately disables
 scanning and persists Off; neither upgrades nor restarts override saved Off.
 
-The content-script/worker scanner contract is version **7**, independently of
-native protocol v3. Every content request includes `scanner_version: 7`,
-`protocol_version: 3`, and `page_url` captured from the isolated content script's
-live `location.href`. Chrome's `MessageSender.url` can remain the original
-document URL after same-document SPA navigation; it is used for the same-origin
-check, not as the current page URL.
+The content-script/worker scanner contract is version **8**, independently of
+native protocol v3. Every content request includes `scanner_version: 8`,
+`protocol_version: 3`, `page_url` captured from the isolated content script's
+live `location.href`, and `document_token`, a random UUID the content script
+creates once per document and also exposes as `__deckardDocumentToken` in its
+isolated world. `MessageSender.url` can remain the original document URL after
+same-document SPA navigation; it is used for the same-origin check, not as the
+current page URL.
 
 Before accepting an enabled configuration request, starting a run, or authorizing
 run operations/replies, the worker checks the current non-private HTTP(S) tab
 and probes its top frame with `scripting.executeScript` in the isolated world.
-Chrome's returned frame ID and document ID and the probed URL must match the
-sender/run and requested URL; the tab URL is rechecked after the probe. A stale
+The returned frame ID must be 0, and the probed URL and document token must match
+the sender/run and requested URL; the tab URL is rechecked after the probe.
+(Firefox has no `documentId`; the token takes its place.) Worker-to-page messages
+that concern a run carry `documentToken`, and content scripts of any other
+document ignore them. A stale
 request cannot replace a newer run. Off, permission revocation, and navigation
 invalidate pending authorizations. No additional permissions are required.
 Old helpers, extensions and content scripts must be updated/reloaded together.
 The 50-word minimum and two-scale policy are unchanged; the policy defaults
-to 0.97. The Core ML package retains the canonical q4-derived model lineage,
-with FP16 computation. Existing explicitly saved thresholds remain unchanged.
+to 0.97. The ONNX model retains the canonical q4 model lineage, with FP32
+activations. Existing explicitly saved thresholds remain unchanged.
 
 ## Requests
 
@@ -112,9 +129,8 @@ lightweight ping or tokenizer-only planning requests.
 The text is limited to 20,000 Unicode characters. The host counts whitespace-
 separated words and tokenizes the original text.
 It scores at most four balanced windows of 510 content tokens each. Windows
-have Gradient CLS=1 and SEP=2 added separately. The Core ML runtime right-pads
-shorter windows to 512 positions with an attention mask; padding does not
-change reported token counts or the 510-content-token window policy.
+have Gradient CLS=1 and SEP=2 added separately. The ONNX runtime scores each
+window unpadded (the model also accepts an attention mask for padded input).
 Missing or incompatible protocol versions fail closed with
 `extension_update_required`.
 
@@ -237,7 +253,7 @@ avoid automatic retry loops.
 There are no unsolicited events or protocol-level cancellation messages.
 The extension owns a serialized queue and sends at most one analysis at a time.
 It can drop queued requests and ignore stale results after navigation or text
-changes. Disconnecting the native port terminates the connection; Chrome owns
+changes. Disconnecting the native port terminates the connection; Firefox owns
 the child process lifetime. An in-flight operation may briefly finish before the
 disconnect is observed. Reconnecting creates a new host and in-memory score
-cache, reusing the validated disk compilation cache when compatible.
+cache.

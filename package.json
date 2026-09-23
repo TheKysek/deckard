@@ -1,10 +1,12 @@
 {
   "name": "deckard",
-  "version": "0.6.4",
+  "version": "0.7.0",
   "private": true,
   "type": "module",
   "scripts": {
     "test": "node --test extension/tests/*.test.js tests/*.test.mjs",
-    "test:native": "node --test native-cli/tests/*.test.mjs"
+    "test:native": "node --test native-cli/tests/*.test.mjs",
+    "lint:firefox": "npx --yes web-ext@10 lint --source-dir extension --ignore-files 'tests/**'",
+    "sign:firefox": "scripts/sign-extension.sh"
   }
 }

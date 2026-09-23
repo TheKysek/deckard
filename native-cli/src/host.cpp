@@ -1,5 +1,5 @@
 #include "host.hpp"
-#include "coreml_gradient.hpp"
+#include "onnx_gradient.hpp"
 #include "tokenizer.hpp"
 #include <algorithm>
 #include <chrono>
@@ -26,7 +26,7 @@ Json failure(const Json& id, const std::string& code, const std::string& message
 struct Analyzer::Impl {
     fs::path home;
     std::unique_ptr<Tokenizer> tokenizer;
-    std::unique_ptr<CoreMLGradient> model;
+    std::unique_ptr<OnnxGradient> model;
     std::list<std::pair<std::string, Json>> cache;
     void load_tokenizer() {
         if (tokenizer) return;
@@ -92,7 +92,7 @@ Json Analyzer::analyze(const std::string& text) {
         size_t chunk_words = words(impl_->tokenizer->decode(parts[index]));
         if (chunk_words < min_words) { short_chunk = true; continue; }
         if (!impl_->model)
-            impl_->model = std::make_unique<CoreMLGradient>(fs::canonical(impl_->home) / "models", model_cache());
+            impl_->model = std::make_unique<OnnxGradient>(fs::canonical(impl_->home) / "models");
         auto tokens = impl_->tokenizer->wrap(parts[index]);
         double score = sigmoid(impl_->model->logit(tokens, std::vector<uint32_t>(tokens.size(), 1)));
         chunks.push_back({{"index", index}, {"score", score}, {"tokens", parts[index].size()}, {"words", chunk_words}});
@@ -222,7 +222,7 @@ bool read_frame(std::istream& stream, Json& message) {
 }
 void write_frame(std::ostream& stream, const Json& message) {
     auto body = message.dump(-1, ' ', true);
-    if (body.size() > 1024 * 1024) throw Error("response_too_large", "Native response exceeds Chrome's 1 MiB limit.");
+    if (body.size() > 1024 * 1024) throw Error("response_too_large", "Native response exceeds the browser's 1 MiB limit.");
     uint32_t length = static_cast<uint32_t>(body.size());
     stream.write(reinterpret_cast<const char*>(&length), sizeof(length));
     stream.write(body.data(), static_cast<std::streamsize>(body.size()));
@@ -271,7 +271,13 @@ void self_test() {
     require(characters("a\xc3\xa9\xf0\x9f\x99\x82") == 3);
     require(words("one\xc2\xa0two\nthree") == 3);
     require(text_sha256("abc") == "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
-    require(extension_id_valid(std::string(32, 'a')) && !extension_id_valid(std::string(32, 'q')));
+    require(extension_id_valid("deckard@thekysek.github.io") &&
+            extension_id_valid("{01234567-89ab-cdef-0123-456789abcdef}") &&
+            !extension_id_valid(std::string(32, 'a')) && !extension_id_valid("a@b/../c") &&
+            !extension_id_valid("chrome-extension://deckard@example.com/"));
+    require(text_sha256("") == "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855");
+    require(text_sha256(std::string(1000, 'a')) ==
+            "41edece42d63e8d9bf515a9ba6932e1c20cbc9f5a5d134645adb5db1b9737ea3");
     require(windows({}).empty());
     for (size_t count : {1, 510, 511, 2040, 2041}) {
         auto parts = windows(std::vector<uint32_t>(count, 7));
